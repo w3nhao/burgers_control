@@ -13,14 +13,14 @@ from evaluation import create_differential_matrices_1d, burgers_solver
 class BurgersEnvClosedLoop(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
-    def __init__(self, test_dataset_path=test_file_path, viscosity=0.01, num_time_points=10):
+    def __init__(self, test_dataset_path=test_file_path, viscosity=0.01, num_time_points=None):
         """
-        Initialize the Burgers Equation Environment with closed-loop simulation
+        Initialize the Burgers Equation Environment with closed-loop simulation and sparse rewards
         
         Args:
             test_dataset_path: Path to test data file
             viscosity: Viscosity coefficient
-            num_time_points: Number of time points for simulation
+            num_time_points: Number of time points for simulation (if None, uses length from dataset)
         """
         super().__init__()
         
@@ -30,9 +30,16 @@ class BurgersEnvClosedLoop(gym.Env):
         # Get the spatial size from the dataset
         self.spatial_size = self.test_dataset.data['observations'][0][0].shape[0]
         
+        # Determine number of time points from the dataset if not provided
+        if num_time_points is None:
+            # Get the length of observations for the first episode
+            self.num_time_points = self.test_dataset.data['observations'][0].shape[0]
+            print(f"Setting num_time_points to {self.num_time_points} based on dataset")
+        else:
+            self.num_time_points = num_time_points
+        
         # Environment parameters
         self.viscosity = viscosity
-        self.num_time_points = num_time_points
         self.current_time = 0
         
         # Define domain and step sizes
@@ -93,7 +100,7 @@ class BurgersEnvClosedLoop(gym.Env):
         self.diffusion_indices = list(self.second_deriv.rows)
         self.diffusion_coeffs = torch.FloatTensor(self.viscosity * np.stack(self.second_deriv.data) / self.spatial_step**2)
 
-    def simulate_one_step(self, state, forcing_term):
+    def simulate(self, state, forcing_term):
         """
         Simulate one step of the Burgers equation
         
@@ -173,14 +180,14 @@ class BurgersEnvClosedLoop(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
-        Take a step in the environment using closed-loop simulation
+        Take a step in the environment using closed-loop simulation with sparse rewards
         
         Args:
             action: Forcing term to apply
             
         Returns:
             observation: Next state
-            reward: Reward for the action
+            reward: Reward for the action (sparse, mostly given at the end)
             terminated: Whether the episode is done
             truncated: Whether the episode was truncated
             info: Additional information
@@ -192,7 +199,7 @@ class BurgersEnvClosedLoop(gym.Env):
         action_tensor = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
         
         # Simulate one step forward in time
-        self.current_state = self.simulate_one_step(self.current_state, action_tensor)
+        self.current_state = self.simulate(self.current_state, action_tensor)
         
         # Increment time
         self.current_time += 1
@@ -201,11 +208,11 @@ class BurgersEnvClosedLoop(gym.Env):
         done = self.current_time >= self.num_time_points
         
         if done:
-            # For terminal state, calculate reward as negative MSE to target
-            reward = -((self.current_state - self.target_state)**2).mean().item()
+            # Use exp to transform the mse to [0, 1]
+            reward = np.exp(-((self.current_state - self.target_state)**2).mean()).item()
         else:
             # For intermediate states, use small negative reward
-            reward = -0.1
+            reward = 0.0
         
         # Convert to numpy array for gym interface
         observation = self.current_state.squeeze().numpy()
@@ -265,16 +272,16 @@ class BurgersEnvClosedLoop(gym.Env):
 
 
 # Factory function to create the environment
-def make_burgers_env_closedloop(test_dataset_path=test_file_path, viscosity=0.01, num_time_points=10):
+def make_burgers_env_closedloop(test_dataset_path=test_file_path, viscosity=0.01, num_time_points=None):
     """
-    Create a closed-loop Burgers equation environment instance
+    Create a closed-loop Burgers equation environment instance with sparse rewards
     
     Args:
         test_dataset_path: Path to test data file
         viscosity: Viscosity coefficient
-        num_time_points: Number of time points for simulation
+        num_time_points: Number of time points for simulation (if None, uses length from dataset)
         
     Returns:
-        BurgersEnvClosedLoop: A closed-loop Burgers equation environment
+        BurgersEnvClosedLoop: A closed-loop Burgers equation environment with sparse rewards
     """
     return BurgersEnvClosedLoop(test_dataset_path, viscosity, num_time_points) 

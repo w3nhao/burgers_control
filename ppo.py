@@ -26,14 +26,19 @@ from utils import load_environment_variables
 load_environment_variables()
 
 # Import our custom Burgers environment
-from burgers_env import BurgersEnv, make_burgers_env
 from gymnasium.envs.registration import register
 
-# Register our custom environment
+# Register our custom environments
 register(
     id="BurgersForcing-v0",
-    entry_point="burgers_env:make_burgers_env",
-    max_episode_steps=10,
+    entry_point="burgers_env:make_burgers_env_closedloop",
+    # max_episode_steps will be determined by the environment
+)
+
+register(
+    id="BurgersVec-v0",
+    entry_point="burgers_vec_env:make_burgers_vec_env",
+    # max_episode_steps will be determined by the environment
 )
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule

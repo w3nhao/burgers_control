@@ -74,4 +74,8 @@ class BurgersTest(torch.utils.data.Dataset):
             target=target,
         )
         
-        
+if __name__ == "__main__":
+    data = BurgersTest(test_file_path)
+    # print(data)
+    
+    print(f"Trajectory length: {len(data[0]['observations'])}")
