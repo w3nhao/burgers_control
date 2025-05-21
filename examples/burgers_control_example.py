@@ -101,7 +101,7 @@ if __name__ == "__main__":
     for t in range(num_time_points):
         forcing_terms[:, t] = controller.compute_control(current_state, spatial_size)
         
-        # Create a temporary forcing tensor for one-step simulation
+        # Create a temporary forcing tensor for closed-loop simulation
         temp_forcing = torch.zeros(batch_size, 1, spatial_size)
         temp_forcing[:, 0] = forcing_terms[:, t]
         

@@ -3,19 +3,22 @@ import torch
 import numpy as np
 import gymnasium as gym
 import tqdm
-from burgers_env import BurgersEnv
+from burgers_env import BurgersEnvClosedLoop, make_burgers_env_closedloop
 
 # Import PPO functionality
-from ppo import Args, Agent, gae, update, layer_init
+from ppo import Args, Agent, layer_init
 
-def run_ppo_burgers():
+def run_ppo_burgers_closedloop():
+    """
+    Run PPO training using the closed-loop Burgers environment
+    """
     # Set up parameters
     args = Args()
     args.num_envs = 1
-    args.total_timesteps = 2048  # Very short test run
-    args.num_steps = 64          # Shorter steps
-    args.num_minibatches = 2     # Fewer minibatches
-    args.update_epochs = 2       # Fewer epochs
+    args.total_timesteps = 200000  # Reasonable training length
+    args.num_steps = 64           # Steps per rollout
+    args.num_minibatches = 2      # Fewer minibatches for faster training
+    args.update_epochs = 4        # Update epochs
     args.learning_rate = 1e-3
     
     # Compute dynamic parameters
@@ -28,7 +31,7 @@ def run_ppo_burgers():
     print(f"Using device: {device}")
     
     # Create environment directly
-    env = BurgersEnv()
+    env = BurgersEnvClosedLoop()
     
     # Observation and action space dimensions
     n_obs = env.observation_space.shape[0]
@@ -59,6 +62,7 @@ def run_ppo_burgers():
     # Initialize metrics
     episode_rewards = []
     episode_lengths = []
+    final_mse_values = []
     
     progress_bar = tqdm.tqdm(range(args.num_iterations))
     for iteration in progress_bar:
@@ -71,7 +75,7 @@ def run_ppo_burgers():
             with torch.no_grad():
                 action, logprob, _, value = agent.get_action_and_value(obs)
             
-            # Execute action in environment
+            # Execute action in environment - this is now a true closed-loop simulation
             next_obs, reward, next_done, infos = step_func(action)
             
             # Store transition
@@ -89,11 +93,15 @@ def run_ppo_burgers():
             
             rollout_rewards.append(reward.item())
             
-            # If episode is done, reset environment
+            # If episode is done, store metrics and reset environment
             if done.any():
                 episode_length = step + 1
-                episode_rewards.append(sum(rollout_rewards))
+                episode_reward = sum(rollout_rewards)
+                episode_rewards.append(episode_reward)
                 episode_lengths.append(episode_length)
+                
+                if 'error' in infos:
+                    final_mse_values.append(infos['error'])
                 
                 # Reset for next episode
                 obs, _ = env.reset()
@@ -188,17 +196,24 @@ def run_ppo_burgers():
         
         # Update progress bar with metrics
         if len(episode_rewards) > 0:
+            mean_reward = np.mean(episode_rewards[-10:]) if episode_rewards else 0
+            mean_length = np.mean(episode_lengths[-10:]) if episode_lengths else 0
+            mean_mse = np.mean(final_mse_values[-10:]) if final_mse_values else 0
+            
             progress_bar.set_description(
                 f"Iteration {iteration}/{args.num_iterations}, "
-                f"Mean Reward: {np.mean(episode_rewards[-10:]):.3f}, "
-                f"Mean Length: {np.mean(episode_lengths[-10:]):.1f}"
+                f"Mean Reward: {mean_reward:.3f}, "
+                f"Mean Length: {mean_length:.1f}, "
+                f"Mean Final MSE: {mean_mse:.6f}"
             )
     
     # Save the model
-    torch.save(agent.state_dict(), "ppo_burgers_model.pt")
+    torch.save(agent.state_dict(), "ppo_burgers_closedloop_model.pt")
     
     # Final evaluation
+    print("\nRunning final evaluation...")
     eval_rewards = []
+    eval_mse = []
     for _ in range(10):
         obs, _ = env.reset()
         obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
@@ -209,15 +224,38 @@ def run_ppo_burgers():
             with torch.no_grad():
                 action, _, _, _ = agent.get_action_and_value(obs)
             
-            obs, reward, done, truncated, _ = env.step(action.cpu().numpy()[0])
+            obs, reward, done, truncated, info = env.step(action.cpu().numpy()[0])
             obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             total_reward += reward
             done = done or truncated
+            
+            if done and 'error' in info:
+                eval_mse.append(info['error'])
         
         eval_rewards.append(total_reward)
     
     print(f"Evaluation rewards: {eval_rewards}")
     print(f"Mean evaluation reward: {np.mean(eval_rewards):.3f}")
+    print(f"Mean final MSE: {np.mean(eval_mse):.6f}")
+    
+    # Validate that our implementation matches expectations
+    print("\nValidating implementation...")
+    env.reset()
+    
+    # Generate a sequence of actions
+    actions = [np.random.uniform(-0.5, 0.5, size=env.action_space.shape) for _ in range(env.num_time_points)]
+    
+    # Apply actions and track states
+    states = []
+    for action in actions:
+        next_state, _, _, _, _ = env.step(action)
+        states.append(next_state.copy())
+    
+    # Validate against trajectory-based implementation
+    validation_result = env.validate_against_trajectory()
+    print(f"Final validation result: {validation_result}")
+    
+    return agent
 
 if __name__ == "__main__":
-    run_ppo_burgers() 
+    run_ppo_burgers_closedloop() 

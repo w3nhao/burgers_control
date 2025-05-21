@@ -3,17 +3,19 @@ import numpy as np
 import torch
 from gymnasium import spaces
 from typing import Dict, Tuple, Any, Optional
-
+import torch.nn.functional as F
 from dataset import BurgersTest, test_file_path
-from evaluation import burgers_solver
+
+# Import existing burgers_solver for comparison/validation
+from evaluation import create_differential_matrices_1d, burgers_solver
 
 
-class BurgersEnv(gym.Env):
+class BurgersEnvClosedLoop(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
     def __init__(self, test_dataset_path=test_file_path, viscosity=0.01, num_time_points=10):
         """
-        Initialize the Burgers Equation Environment
+        Initialize the Burgers Equation Environment with closed-loop simulation
         
         Args:
             test_dataset_path: Path to test data file
@@ -33,6 +35,29 @@ class BurgersEnv(gym.Env):
         self.num_time_points = num_time_points
         self.current_time = 0
         
+        # Define domain and step sizes
+        self.domain_min = 0.0
+        self.domain_max = 1.0
+        self.spatial_step = (self.domain_max - self.domain_min) / (self.spatial_size + 1)
+        
+        # Total simulation time and time step for numerical integration
+        self.sim_time = 0.1  # Match the default in burgers_solver
+        self.time_step = 1e-4  # Match the default in burgers_solver
+        
+        # Time step for simulation matches the total simulation time divided by num_time_points
+        self.simulation_dt = self.sim_time / self.num_time_points
+        
+        # Steps per simulation time step
+        self.steps_per_sim = int(self.simulation_dt / self.time_step)
+        
+        # Setup differential matrices for finite difference method
+        self.first_deriv, self.second_deriv = create_differential_matrices_1d(
+            self.spatial_size + 2, device='cpu'
+        )
+        
+        # Prepare the differential matrices for efficient computation
+        self._prepare_differential_matrices()
+        
         # Define action and observation spaces
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(self.spatial_size,), dtype=np.float32
@@ -48,6 +73,63 @@ class BurgersEnv(gym.Env):
         self.episode_idx = None
         self.initial_state = None
         self.actions_history = []
+
+    def _prepare_differential_matrices(self):
+        """Prepare differential matrices for efficient computation"""
+        # Adjust boundary conditions for the matrices
+        self.first_deriv.rows[0] = self.first_deriv.rows[0][:2]
+        self.first_deriv.rows[-1] = self.first_deriv.rows[-1][-2:]
+        self.first_deriv.data[0] = self.first_deriv.data[0][:2]
+        self.first_deriv.data[-1] = self.first_deriv.data[-1][-2:]
+        
+        self.second_deriv.rows[0] = self.second_deriv.rows[0][:3]
+        self.second_deriv.rows[-1] = self.second_deriv.rows[-1][-3:]
+        self.second_deriv.data[0] = self.second_deriv.data[0][:3]
+        self.second_deriv.data[-1] = self.second_deriv.data[-1][-3:]
+        
+        # Convert sparse matrices to tensor format for computation
+        self.transport_indices = list(self.first_deriv.rows)
+        self.transport_coeffs = torch.FloatTensor(np.stack(self.first_deriv.data) / (2 * self.spatial_step))
+        self.diffusion_indices = list(self.second_deriv.rows)
+        self.diffusion_coeffs = torch.FloatTensor(self.viscosity * np.stack(self.second_deriv.data) / self.spatial_step**2)
+
+    def simulate_one_step(self, state, forcing_term):
+        """
+        Simulate one step of the Burgers equation
+        
+        Args:
+            state: Current state
+            forcing_term: Forcing term to apply
+            
+        Returns:
+            next_state: State after one simulation step
+        """
+        # Make sure state is properly padded with boundary conditions
+        state_with_boundary = F.pad(state, (1, 1))
+        
+        # Process forcing term (already has the right shape)
+        forcing_with_boundary = F.pad(forcing_term, (1, 1))
+        
+        # Simulate the required number of small time steps
+        for _ in range(self.steps_per_sim):
+            # Remove boundary values and repad to maintain consistent size
+            state_with_boundary = state_with_boundary[..., 1:-1]
+            state_with_boundary = F.pad(state_with_boundary, (1, 1))
+            
+            # Calculate nonlinear transport and diffusion terms
+            squared_state = state_with_boundary**2
+            transport_term = torch.einsum('nsi,si->ns', squared_state[..., self.transport_indices], self.transport_coeffs)
+            diffusion_term = torch.einsum('nsi,si->ns', state_with_boundary[..., self.diffusion_indices], self.diffusion_coeffs)
+            
+            # Update state using Euler step
+            state_with_boundary = state_with_boundary + self.time_step * (
+                -(1/2) * transport_term + 
+                diffusion_term + 
+                forcing_with_boundary
+            )
+        
+        # Return state without boundary
+        return state_with_boundary[..., 1:-1]
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
@@ -91,7 +173,7 @@ class BurgersEnv(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
-        Take a step in the environment
+        Take a step in the environment using closed-loop simulation
         
         Args:
             action: Forcing term to apply
@@ -103,32 +185,20 @@ class BurgersEnv(gym.Env):
             truncated: Whether the episode was truncated
             info: Additional information
         """
-        # Store the action
+        # Store the action for validation
         self.actions_history.append(action)
+        
+        # Convert action to tensor
+        action_tensor = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
+        
+        # Simulate one step forward in time
+        self.current_state = self.simulate_one_step(self.current_state, action_tensor)
         
         # Increment time
         self.current_time += 1
         
         # Check if the episode is done
         done = self.current_time >= self.num_time_points
-        
-        # For simulation purposes, we need to pad actions to match num_time_points
-        # Create a forcing terms tensor with the correct dimensions
-        forcing_terms = torch.zeros(1, self.num_time_points, self.spatial_size)
-        
-        # Fill in the actions we've taken so far
-        for i, act in enumerate(self.actions_history):
-            forcing_terms[0, i] = torch.tensor(act, dtype=torch.float32)
-        
-        # Simulate full trajectory, but we'll only use the state at current_time
-        trajectory = burgers_solver(
-            self.initial_state, 
-            forcing_terms, 
-            num_time_points=self.num_time_points
-        )
-        
-        # Get the current state from the trajectory (based on current time)
-        self.current_state = trajectory[:, self.current_time].reshape(1, self.spatial_size)
         
         if done:
             # For terminal state, calculate reward as negative MSE to target
@@ -147,6 +217,39 @@ class BurgersEnv(gym.Env):
         }
         
         return observation, reward, done, False, info
+        
+    def validate_against_trajectory(self):
+        """
+        Validate the closed-loop simulation against the trajectory-based simulation
+        
+        Returns:
+            bool: Whether the simulations match
+        """
+        if not self.actions_history:
+            return False
+            
+        # Create a forcing terms tensor with the correct dimensions
+        forcing_terms = torch.zeros(1, self.num_time_points, self.spatial_size)
+        
+        # Fill in the actions we've taken so far
+        for i, act in enumerate(self.actions_history):
+            forcing_terms[0, i] = torch.tensor(act, dtype=torch.float32)
+        
+        # Simulate using the trajectory-based approach
+        trajectory = burgers_solver(
+            self.initial_state, 
+            forcing_terms, 
+            num_time_points=self.num_time_points
+        )
+        
+        # Get the current state from the trajectory
+        trajectory_state = trajectory[:, self.current_time]
+        
+        # Compare with our closed-loop simulation state
+        error = ((self.current_state - trajectory_state)**2).mean().item()
+        
+        print(f"Validation error: {error}")
+        return error < 1e-6  # Small threshold for numerical precision issues
 
     def render(self):
         """
@@ -162,9 +265,9 @@ class BurgersEnv(gym.Env):
 
 
 # Factory function to create the environment
-def make_burgers_env(test_dataset_path=test_file_path, viscosity=0.01, num_time_points=10):
+def make_burgers_env_closedloop(test_dataset_path=test_file_path, viscosity=0.01, num_time_points=10):
     """
-    Create a Burgers equation environment instance
+    Create a closed-loop Burgers equation environment instance
     
     Args:
         test_dataset_path: Path to test data file
@@ -172,6 +275,6 @@ def make_burgers_env(test_dataset_path=test_file_path, viscosity=0.01, num_time_
         num_time_points: Number of time points for simulation
         
     Returns:
-        BurgersEnv: A Burgers equation environment
+        BurgersEnvClosedLoop: A closed-loop Burgers equation environment
     """
-    return BurgersEnv(test_dataset_path, viscosity, num_time_points) 
+    return BurgersEnvClosedLoop(test_dataset_path, viscosity, num_time_points) 
