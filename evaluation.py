@@ -6,7 +6,7 @@ import scipy.sparse as sp
 import tqdm
 from functools import partial
 
-def create_differential_matrices_1d(grid_size, device='cpu'):
+def create_differential_matrices_1d(grid_size):
     """
     Creates first and second derivative matrices for 1D finite difference approximations.
     

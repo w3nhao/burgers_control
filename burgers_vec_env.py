@@ -6,7 +6,7 @@ from gymnasium.vector import VectorEnv
 from typing import Dict, Tuple, Any, Optional, List, Union
 
 import torch.nn.functional as F
-from dataset import BurgersTest, test_file_path
+from dataset import BurgersDataset
 
 # Import existing utilities
 from evaluation import create_differential_matrices_1d
@@ -20,7 +20,7 @@ class BurgersVecEnv(VectorEnv):
     
     def __init__(self, 
                  num_envs: int = 1, 
-                 test_dataset_path=test_file_path, 
+                 mode="train", 
                  viscosity=0.01, 
                  num_time_points=None):
         """
@@ -28,20 +28,26 @@ class BurgersVecEnv(VectorEnv):
         
         Args:
             num_envs: Number of parallel environments
-            test_dataset_path: Path to test data file
+            mode: "train" or "test"
             viscosity: Viscosity coefficient
             num_time_points: Number of time points for simulation (if None, uses length from dataset)
         """
-        # Load test dataset
-        self.test_dataset = BurgersTest(test_dataset_path)
+        assert mode in ["train", "test"]
+        
+        self.mode = mode
+        # Load dataset
+        self.dataset = BurgersDataset(mode=mode)
+        
+        if mode == "test":
+            assert num_envs == len(self.dataset)
         
         # Get the spatial size from the dataset
-        self.spatial_size = self.test_dataset.data['observations'][0][0].shape[0]
+        self.spatial_size = self.dataset.data['observations'][0][0].shape[0]
         
         # Determine number of time points from the dataset if not provided
         if num_time_points is None:
             # Get the length of observations for the first episode
-            self.num_time_points = self.test_dataset.data['observations'][0].shape[0]
+            self.num_time_points = self.dataset.data['observations'][0].shape[0]
             print(f"Setting num_time_points to {self.num_time_points} based on dataset")
         else:
             self.num_time_points = num_time_points
@@ -82,7 +88,7 @@ class BurgersVecEnv(VectorEnv):
         
         # Setup differential matrices for finite difference method
         self.first_deriv, self.second_deriv = create_differential_matrices_1d(
-            self.spatial_size + 2, device='cpu'
+            self.spatial_size + 2
         )
         
         # Prepare the differential matrices for efficient computation
@@ -195,18 +201,26 @@ class BurgersVecEnv(VectorEnv):
         # Reset environments according to mask
         for i in range(self.num_envs):
             if mask[i]:
-                # Set random seed for this environment
-                if seeds[i] is not None:
-                    np.random.seed(seeds[i])
-                
-                # Choose a random episode from the test dataset
-                self.episode_idx[i] = np.random.randint(0, len(self.test_dataset))
-                episode_data = self.test_dataset[self.episode_idx[i]]
-                
-                # Get initial state and target state
-                initial_state = torch.tensor(episode_data['observations'][0], device=self.device).float()
-                target_state = torch.tensor(episode_data['target'], device=self.device).float()
-                
+                if self.mode == "train":
+                    # Set random seed for this environment
+                    if seeds[i] is not None:
+                        np.random.seed(seeds[i])
+                    
+                    # Choose a random episode from the train dataset
+                    self.episode_idx[i] = np.random.randint(0, len(self.dataset))
+                    episode_data = self.dataset[self.episode_idx[i]]
+                    
+                    # Get initial state and target state
+                    initial_state = torch.tensor(episode_data['observations'][0], device=self.device).float()
+                    target_state = torch.tensor(episode_data['targets'], device=self.device).float()
+                    
+                elif self.mode == "test":
+                    assert self.num_envs == len(self.dataset)
+                    
+                    # Get initial state and target state
+                    initial_state = torch.tensor(self.dataset[i]['observations'][0], device=self.device).float()
+                    target_state = torch.tensor(self.dataset[i]['targets'], device=self.device).float()
+                    
                 # Store states
                 self.current_state[i] = initial_state
                 self.initial_state[i] = initial_state
@@ -347,17 +361,17 @@ class BurgersVecEnv(VectorEnv):
 
 
 # Factory function to create the environment
-def make_burgers_vec_env(num_envs=1, test_dataset_path=test_file_path, viscosity=0.01, num_time_points=None):
+def make_burgers_vec_env(num_envs=1, mode="train", viscosity=0.01, num_time_points=None):
     """
     Create a vectorized Burgers equation environment
     
     Args:
         num_envs: Number of parallel environments
-        test_dataset_path: Path to test data file
+        mode: "train" or "test"
         viscosity: Viscosity coefficient
         num_time_points: Number of time points for simulation (if None, uses length from dataset)
         
     Returns:
         BurgersVecEnv: A vectorized Burgers equation environment
     """
-    return BurgersVecEnv(num_envs, test_dataset_path, viscosity, num_time_points) 
+    return BurgersVecEnv(num_envs, mode, viscosity, num_time_points) 

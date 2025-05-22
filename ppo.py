@@ -25,21 +25,8 @@ import wandb
 from utils import load_environment_variables
 load_environment_variables()
 
-# Import our custom Burgers environment
-from gymnasium.envs.registration import register
+from burgers_vec_env import BurgersVecEnv
 
-# Register our custom environments
-register(
-    id="BurgersForcing-v0",
-    entry_point="burgers_env:make_burgers_env_closedloop",
-    # max_episode_steps will be determined by the environment
-)
-
-register(
-    id="BurgersVec-v0",
-    entry_point="burgers_vec_env:make_burgers_vec_env",
-    # max_episode_steps will be determined by the environment
-)
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
@@ -59,15 +46,15 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "BurgersForcing-v0"
+    env_id: str = "BurgersVec-v0"
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 200000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 64
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -110,24 +97,6 @@ class Args:
     cudagraphs: bool = False
     """whether to use cudagraphs on top of compile."""
 
-
-def make_env(env_id, idx, capture_video, run_name, gamma):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = gym.wrappers.ClipAction(env)
-        env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        return env
-
-    return thunk
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -307,23 +276,32 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
+    # Set device
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
+    print(f"Using device: {device}")
+    
     ####### Environment setup #######
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma) for i in range(args.num_envs)]
-    )
-    n_act = math.prod(envs.single_action_space.shape)
-    n_obs = math.prod(envs.single_observation_space.shape)
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    # Create vectorized environment
+    if args.env_id == "BurgersVec-v0":
+        env = BurgersVecEnv(num_envs=args.num_envs)
+    else:
+        raise ValueError(f"Environment {args.env_id} not found")
+    # Observation and action space dimensions
+    n_obs = env.single_observation_space.shape[0]
+    n_act = env.single_action_space.shape[0]
 
     # Register step as a special op not to graph break
     # @torch.library.custom_op("mylib::step", mutates_args=())
-    def step_func(action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        next_obs_np, reward, terminations, truncations, info = envs.step(action.cpu().numpy())
-        next_done = np.logical_or(terminations, truncations)
-        return torch.as_tensor(next_obs_np, dtype=torch.float), torch.as_tensor(reward), torch.as_tensor(next_done), info
-
+    def step_func(action_tensor):
+        action = action_tensor.cpu().numpy()
+        next_obs, rewards, terminations, truncations, info = env.step(action)
+        return (
+            torch.tensor(next_obs, dtype=torch.float32, device=device),
+            torch.tensor(rewards, dtype=torch.float32, device=device),
+            torch.tensor(np.logical_or(terminations, truncations), dtype=torch.bool, device=device),
+            info
+        )
+        
     ####### Agent #######
     agent = Agent(n_obs, n_act, device=device)
     # Make a version of agent with detached params
@@ -358,7 +336,8 @@ if __name__ == "__main__":
     avg_returns = deque(maxlen=20)
     global_step = 0
     container_local = None
-    next_obs = torch.tensor(envs.reset()[0], device=device, dtype=torch.float)
+    next_obs, _ = env.reset(seed=args.seed)
+    next_obs = torch.tensor(next_obs, device=device, dtype=torch.float)
     next_done = torch.zeros(args.num_envs, device=device, dtype=torch.bool)
     # max_ep_ret = -float("inf")
     pbar = tqdm.tqdm(range(1, args.num_iterations + 1))
@@ -423,5 +402,30 @@ if __name__ == "__main__":
             wandb.log(
                 {"speed": speed, "episode_return": avg_returns_t, "r": r, "r_max": r_max, "lr": lr, **logs}, step=global_step
             )
+            
+    env.close()
+    
+    torch.save(agent.state_dict(), "ppo_burgers_vectorized_model.pt")
 
-    envs.close()
+    # Final evaluation using 
+    eval_env = BurgersVecEnv(num_envs=50, mode="test")
+    
+    obs, _ = eval_env.reset()
+    obs = torch.tensor(obs, dtype=torch.float32, device=device)
+    done = torch.zeros(eval_env.num_envs, device=device, dtype=torch.bool)
+    total_reward = 0
+    
+    while not done.all():
+        with torch.no_grad():
+            action, _, _, _ = agent.get_action_and_value(obs)
+        
+        obs, reward, done, truncated, info = eval_env.step(action.cpu().numpy())
+        obs = torch.tensor(obs, dtype=torch.float32, device=device)
+        total_reward += reward
+        
+        if done.all():
+            eval_mse = info['error']
+            
+    print(f"Total reward: {total_reward}")
+    print(f"Evaluation MSE: {np.mean(eval_mse)}")
+
