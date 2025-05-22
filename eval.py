@@ -1,9 +1,9 @@
 import torch
 import numpy as np
 import argparse
-from dataset import BurgersTest, test_file_path
-from evaluation import evaluate_model_performance
-from burgers_env import BurgersEnvClosedLoop
+from dataset import BurgersDataset
+from burgers import evaluate_model_performance
+from burgers_onthefly_env import BurgersOnTheFlyVecEnv
 from ppo import Agent
 
 def evaluate_policy(model_path, test_dataset_path=test_file_path, num_episodes=10, device=None):
@@ -25,10 +25,10 @@ def evaluate_policy(model_path, test_dataset_path=test_file_path, num_episodes=1
     print(f"Using device: {device}")
     
     # Load test dataset
-    test_dataset = BurgersTest(test_dataset_path)
+    test_dataset = BurgersDataset(mode="test")
     
     # Create environment to get observation/action dimensions
-    env = BurgersEnvClosedLoop(test_dataset_path=test_dataset_path)
+    env = BurgersOnTheFlyVecEnv(test_dataset_path=test_dataset_path)
     n_obs = env.observation_space.shape[0]
     n_act = env.action_space.shape[0]
     

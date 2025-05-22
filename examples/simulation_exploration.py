@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import numpy as np
-from evaluation import create_differential_matrices_1d, simulate_burgers_equation, burgers_solver, evaluate_model_performance
+from burgers import create_differential_matrices_1d, simulate_burgers_equation, burgers_solver, evaluate_model_performance
 from dataset import get_squence_data, train_file_path, test_file_path, BurgersTest
 
 def print_tensor_info(name, tensor):

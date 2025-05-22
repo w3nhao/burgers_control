@@ -1,4 +1,3 @@
-import gymnasium as gym
 import numpy as np
 import torch
 from gymnasium import spaces
@@ -6,55 +5,50 @@ from gymnasium.vector import VectorEnv
 from typing import Dict, Tuple, Any, Optional, List, Union
 
 import torch.nn.functional as F
-from dataset import BurgersDataset
 
-# Import existing utilities
-from burgers import create_differential_matrices_1d
+# Import functions from burgers.py
+from burgers import (
+    create_differential_matrices_1d,
+    make_initial_conditions_and_varying_forcing_terms,
+    simulate_burgers_equation
+)
 
 
-class BurgersVecEnv(VectorEnv):
+class BurgersOnTheFlyVecEnv(VectorEnv):
     """
-    Vectorized version of the BurgersEnvClosedLoop that efficiently simulates 
-    multiple environments in parallel using tensor operations.
+    Vectorized Burgers Equation Environment that generates data on-the-fly.
+    Instead of using pregenerated data, this environment creates new initial conditions
+    and targets on each reset by simulating the system forward.
     """
     
     def __init__(self, 
-                 num_envs: int = 1, 
-                 mode="train", 
-                 viscosity=0.01, 
-                 num_time_points=None):
+                 num_envs: int = 1,
+                 spatial_size: int = 128,
+                 num_time_points: int = 10,
+                 viscosity: float = 0.01,
+                 sim_time: float = 0.1,
+                 time_step: float = 1e-4,
+                 scaling_factor: float = 1.0,
+                 max_time: float = 1.0):
         """
-        Initialize the vectorized Burgers Equation Environment
+        Initialize the vectorized on-the-fly Burgers Equation Environment
         
         Args:
             num_envs: Number of parallel environments
-            mode: "train" or "test"
+            spatial_size: Number of spatial points
+            num_time_points: Number of time points for simulation
             viscosity: Viscosity coefficient
-            num_time_points: Number of time points for simulation (if None, uses length from dataset)
+            sim_time: Total physical simulation time
+            time_step: Physical simulation time step size
+            scaling_factor: Scaling factor for forcing terms
+            max_time: Maximum simulation time
         """
-        assert mode in ["train", "test"]
-        
-        self.mode = mode
-        # Load dataset
-        self.dataset = BurgersDataset(mode=mode)
-        
-        if mode == "test":
-            assert num_envs == len(self.dataset)
-        
-        # Get the spatial size from the dataset
-        self.spatial_size = self.dataset.data['observations'][0][0].shape[0]
-        
-        # Determine number of time points from the dataset if not provided
-        if num_time_points is None:
-            # Get the length of observations for the first episode
-            self.num_time_points = self.dataset.data['observations'][0].shape[0]
-            print(f"Setting num_time_points to {self.num_time_points} based on dataset")
-        else:
-            self.num_time_points = num_time_points
+        self.spatial_size = spatial_size
+        self.num_time_points = num_time_points
         
         # Define action and observation spaces
         single_action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(self.spatial_size,), dtype=np.float32
+            low=-10.0, high=10.0, shape=(self.spatial_size,), dtype=np.float32
         )
         single_observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.spatial_size,), dtype=np.float32
@@ -69,16 +63,16 @@ class BurgersVecEnv(VectorEnv):
         
         # Environment parameters
         self.viscosity = viscosity
+        self.sim_time = sim_time
+        self.time_step = time_step
+        self.scaling_factor = scaling_factor
+        self.max_time = max_time
         self.current_time = np.zeros(num_envs, dtype=int)
         
         # Define domain and step sizes
         self.domain_min = 0.0
         self.domain_max = 1.0
         self.spatial_step = (self.domain_max - self.domain_min) / (self.spatial_size + 1)
-        
-        # Total simulation time and time step for numerical integration
-        self.sim_time = 0.1  # Match the default in burgers_solver
-        self.time_step = 1e-4  # Match the default in burgers_solver
         
         # Time step for simulation matches the total simulation time divided by num_time_points
         self.simulation_dt = self.sim_time / self.num_time_points
@@ -97,7 +91,6 @@ class BurgersVecEnv(VectorEnv):
         # Current state and episode info - batched for all environments
         self.current_state = None  # Will be tensor of shape [num_envs, spatial_size]
         self.target_state = None   # Will be tensor of shape [num_envs, spatial_size]
-        self.episode_idx = np.zeros(num_envs, dtype=int)
         self.initial_state = None  # Will be tensor of shape [num_envs, spatial_size]
         
         # Track actions for validation - list of lists, one per environment
@@ -105,6 +98,9 @@ class BurgersVecEnv(VectorEnv):
         
         # Using CPU by default, can be moved to GPU if needed
         self.device = torch.device("cpu")
+        
+        # Random generator for reproducibility
+        self.rng = np.random.RandomState()
 
     def _prepare_differential_matrices(self):
         """Prepare differential matrices for efficient computation"""
@@ -169,7 +165,8 @@ class BurgersVecEnv(VectorEnv):
               seed: Optional[Union[int, List[int]]] = None, 
               options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        Reset specified environments or all environments if mask is None
+        Reset specified environments or all environments if mask is None.
+        Generates new initial conditions and target states by simulating forward.
         
         Args:
             mask: Boolean mask of which environments to reset (True = reset)
@@ -180,16 +177,12 @@ class BurgersVecEnv(VectorEnv):
             observations: Initial states for reset environments
             info: Additional information
         """
-        mask = self._normalize_mask(mask)
-        
-        # Initialize random number generator with seed
+        # Set seed if provided
         if seed is not None:
             if isinstance(seed, int):
-                seeds = [seed + i for i in range(self.num_envs)]
+                self.rng = np.random.RandomState(seed)
             else:
-                seeds = seed
-        else:
-            seeds = [None] * self.num_envs
+                self.rng = np.random.RandomState(seed[0] if len(seed) > 0 else None)
         
         # If this is the first reset, initialize all environments
         if self.current_state is None:
@@ -197,40 +190,48 @@ class BurgersVecEnv(VectorEnv):
             self.target_state = torch.zeros((self.num_envs, self.spatial_size), device=self.device)
             self.initial_state = torch.zeros((self.num_envs, self.spatial_size), device=self.device)
             mask = np.ones(self.num_envs, dtype=bool)
+        else:
+            # Normalize mask to reset only specified environments
+            mask = self._normalize_mask(mask)
         
-        # Reset environments according to mask
-        for i in range(self.num_envs):
-            if mask[i]:
-                if self.mode == "train":
-                    # Set random seed for this environment
-                    if seeds[i] is not None:
-                        np.random.seed(seeds[i])
+        # Count environments to reset
+        num_to_reset = np.sum(mask)
+        
+        if num_to_reset > 0:
+            # Generate initial conditions and forcing terms for environments to reset
+            initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
+                num_to_reset, num_to_reset, self.spatial_size, self.num_time_points,
+                scaling_factor=self.scaling_factor, max_time=self.max_time
+            )
+            
+            # Move to device
+            initial_conditions = initial_conditions.to(self.device)
+            forcing_terms = forcing_terms.to(self.device)
+            
+            # Simulate forward to get target states
+            trajectories = simulate_burgers_equation(
+                initial_conditions, forcing_terms, self.viscosity, self.sim_time,
+                time_step=self.time_step, num_time_points=self.num_time_points
+            )
+            
+            # Extract target states (final state of simulation)
+            target_states = trajectories[:, -1, :]
+            
+            # Update states for environments being reset
+            reset_idx = 0
+            for i in range(self.num_envs):
+                if mask[i]:
+                    self.current_state[i] = initial_conditions[reset_idx]
+                    self.initial_state[i] = initial_conditions[reset_idx]
+                    self.target_state[i] = target_states[reset_idx]
                     
-                    # Choose a random episode from the train dataset
-                    self.episode_idx[i] = np.random.randint(0, len(self.dataset))
-                    episode_data = self.dataset[self.episode_idx[i]]
+                    # Reset actions history
+                    self.actions_history[i] = []
                     
-                    # Get initial state and target state
-                    initial_state = torch.tensor(episode_data['observations'][0], device=self.device).float()
-                    target_state = torch.tensor(episode_data['targets'], device=self.device).float()
+                    # Reset time counter
+                    self.current_time[i] = 0
                     
-                elif self.mode == "test":
-                    assert self.num_envs == len(self.dataset)
-                    
-                    # Get initial state and target state
-                    initial_state = torch.tensor(self.dataset[i]['observations'][0], device=self.device).float()
-                    target_state = torch.tensor(self.dataset[i]['targets'], device=self.device).float()
-                    
-                # Store states
-                self.current_state[i] = initial_state
-                self.initial_state[i] = initial_state
-                self.target_state[i] = target_state
-                
-                # Reset actions history for this environment
-                self.actions_history[i] = []
-                
-                # Reset time counter
-                self.current_time[i] = 0
+                    reset_idx += 1
         
         # Convert to numpy for gym interface - must move to CPU first
         observations = self.current_state.cpu().numpy()
@@ -238,7 +239,7 @@ class BurgersVecEnv(VectorEnv):
         # Prepare info dict
         info = {
             "target_state": self.target_state.cpu().numpy(),
-            "episode_idx": self.episode_idx.copy(),
+            "initial_state": self.initial_state.cpu().numpy(),
         }
         
         return observations, info
@@ -279,10 +280,11 @@ class BurgersVecEnv(VectorEnv):
         # For terminated environments, calculate reward based on final state
         for i in range(self.num_envs):
             if terminations[i]:
-                # Use exp to transform the mse to [0, 1]
-                rewards[i] = np.exp(-((self.current_state[i] - self.target_state[i])**2).mean().cpu().item())
+                # Use negative MSE as the reward
+                mse = ((self.current_state[i] - self.target_state[i])**2).mean().cpu().item()
+                rewards[i] = -mse
         
-        # No truncations in this environment
+        # No truncations in this environment as mentioned in the requirements
         truncations = np.zeros(self.num_envs, dtype=bool)
         
         # Calculate errors for info
@@ -349,29 +351,45 @@ class BurgersVecEnv(VectorEnv):
             return
         
         if isinstance(seed, int):
-            seeds = [seed + i for i in range(self.num_envs)]
+            self.rng = np.random.RandomState(seed)
         else:
-            seeds = seed
-            
-        # Store seeds for reset
-        self.seeds = seeds
-        
-        # Set seed for numpy
-        np.random.seed(seeds[0])
+            self.rng = np.random.RandomState(seed[0] if len(seed) > 0 else None)
 
 
 # Factory function to create the environment
-def make_burgers_vec_env(num_envs=1, mode="train", viscosity=0.01, num_time_points=None):
+def make_burgers_onthefly_vec_env(
+    num_envs=1,
+    spatial_size=64,
+    num_time_points=10,
+    viscosity=0.01,
+    sim_time=0.1,
+    time_step=1e-4,
+    scaling_factor=1.0,
+    max_time=1.0
+):
     """
-    Create a vectorized Burgers equation environment
+    Create a vectorized Burgers equation environment with on-the-fly data generation
     
     Args:
         num_envs: Number of parallel environments
-        mode: "train" or "test"
+        spatial_size: Number of spatial points
+        num_time_points: Number of time points for simulation
         viscosity: Viscosity coefficient
-        num_time_points: Number of time points for simulation (if None, uses length from dataset)
+        sim_time: Total physical simulation time
+        time_step: Physical simulation time step size
+        scaling_factor: Scaling factor for forcing terms
+        max_time: Maximum simulation time
         
     Returns:
-        BurgersVecEnv: A vectorized Burgers equation environment
+        BurgersOnTheFlyVecEnv: A vectorized Burgers equation environment
     """
-    return BurgersVecEnv(num_envs, mode, viscosity, num_time_points) 
+    return BurgersOnTheFlyVecEnv(
+        num_envs=num_envs,
+        spatial_size=spatial_size,
+        num_time_points=num_time_points,
+        viscosity=viscosity,
+        sim_time=sim_time,
+        time_step=time_step,
+        scaling_factor=scaling_factor,
+        max_time=max_time
+    ) 

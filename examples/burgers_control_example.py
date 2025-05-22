@@ -8,7 +8,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from dataset import BurgersTest, test_file_path
-from evaluation import burgers_solver
+from burgers import burgers_solver
 
 class SimpleController:
     """A basic controller for the Burgers equation"""

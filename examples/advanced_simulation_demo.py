@@ -7,7 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from evaluation import simulate_burgers_equation, create_differential_matrices_1d
+from burgers import simulate_burgers_equation, create_differential_matrices_1d
 from dataset import BurgersTest, test_file_path
 
 def print_tensor_info(name, tensor):
