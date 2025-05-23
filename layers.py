@@ -1,7 +1,49 @@
 import torch
 import torch.nn as nn
-from typing import List, Type
+from typing import List, Type, Dict
 
+def get_activation_fn(act_fn: str) -> Type[nn.Module]:
+    """
+    Get activation function class from string name.
+    
+    Args:
+        act_fn (str): Name of the activation function
+        
+    Returns:
+        Type[nn.Module]: PyTorch activation function class
+        
+    Raises:
+        ValueError: If activation function name is not supported
+        
+    Supported activation functions:
+        - relu, tanh, gelu, sigmoid, elu, swish, softplus, softsign
+        - selu, mish, hardswish, hardsigmoid, hardtanh
+    """
+    activation_map: Dict[str, Type[nn.Module]] = {
+        "relu": nn.ReLU,
+        "tanh": nn.Tanh,
+        "gelu": nn.GELU,
+        "sigmoid": nn.Sigmoid,
+        "elu": nn.ELU,
+        "swish": nn.SiLU,
+        "softplus": nn.Softplus,
+        "softsign": nn.Softsign,
+        "selu": nn.SELU,
+        "mish": nn.Mish,
+        "hardswish": nn.Hardswish,
+        "hardsigmoid": nn.Hardsigmoid,
+        "hardtanh": nn.Hardtanh,
+    }
+    
+    act_fn_lower = act_fn.lower().strip()
+    if act_fn_lower not in activation_map:
+        supported_acts = ", ".join(sorted(activation_map.keys()))
+        raise ValueError(
+            f"Unsupported activation function: '{act_fn}'. "
+            f"Supported functions: {supported_acts}"
+        )
+    
+    return activation_map[act_fn_lower]
 
 class MLP(nn.Module):
     """

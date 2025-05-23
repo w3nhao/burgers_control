@@ -8,8 +8,8 @@ import os
 import random
 import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import List, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -29,7 +29,9 @@ from burgers_onthefly_env import BurgersOnTheFlyVecEnv
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
-from layers import MLP
+from layers import MLP, get_activation_fn
+
+import datetime
 
 @dataclass
 class Args:
@@ -62,10 +64,16 @@ class Args:
     mse_scaling_factor: float = 1e4
     """the scaling factor of the MSE reward"""
     
+    # Model specific arguments
+    hidden_dims: List[int] = field(default_factory=lambda: [1024, 1024, 1024])
+    """the hidden dimensions of the MLP"""
+    act_fn: str = "gelu"
+    """the activation function of the MLP"""
+    
     # Algorithm specific arguments
     total_timesteps: int = 10000000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-3
     """the learning rate of the optimizer"""
     num_envs: int = 1024
     """the number of parallel game environments"""
@@ -77,7 +85,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 4
+    num_minibatches: int = 32
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -118,7 +126,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, n_obs, n_act, device=None):
+    def __init__(self, n_obs, n_act, device=None, hidden_dims=None, act_fn=None):
         super().__init__()
         
         # n_obs now includes both current state and target state (goal-conditioned)
@@ -128,8 +136,8 @@ class Agent(nn.Module):
         self.critic = MLP(
             in_dim=n_obs,
             out_dim=1,
-            hidden_dims=[2048, 2048],
-            act_fn=nn.ReLU,
+            hidden_dims=hidden_dims,
+            act_fn=get_activation_fn(act_fn),
             norm_fn=nn.Identity,
             dropout_rate=0.0,
             use_input_residual=True,
@@ -140,8 +148,8 @@ class Agent(nn.Module):
         self.actor_mean = MLP(
             in_dim=n_obs,
             out_dim=n_act,
-            hidden_dims=[2048, 2048],
-            act_fn=nn.ReLU,
+            hidden_dims=hidden_dims,
+            act_fn=get_activation_fn(act_fn),
             norm_fn=nn.Identity,
             dropout_rate=0.0,
             use_input_residual=True,
@@ -290,7 +298,9 @@ if __name__ == "__main__":
     args.minibatch_size = batch_size // args.num_minibatches
     args.batch_size = args.num_minibatches * args.minibatch_size
     args.num_iterations = args.total_timesteps // args.batch_size
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{args.compile}__{args.cudagraphs}"
+    
+    exp_start_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{exp_start_time}"
 
     wandb.init(
         project="ppo_continuous_action",
@@ -341,9 +351,9 @@ if __name__ == "__main__":
         )
         
     ####### Agent #######
-    agent = Agent(n_obs, n_act, device=device)
+    agent = Agent(n_obs, n_act, device=device, hidden_dims=args.hidden_dims, act_fn=args.act_fn)
     # Make a version of agent with detached params
-    agent_inference = Agent(n_obs, n_act, device=device)
+    agent_inference = Agent(n_obs, n_act, device=device, hidden_dims=args.hidden_dims, act_fn=args.act_fn)
     agent_inference_p = from_module(agent).data
     agent_inference_p.to_module(agent_inference)
 
