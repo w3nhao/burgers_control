@@ -29,7 +29,7 @@ from burgers_onthefly_env import BurgersOnTheFlyVecEnv
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
-from mlp import MLP
+from layers import MLP
 
 @dataclass
 class Args:
@@ -63,7 +63,7 @@ class Args:
     """the scaling factor of the MSE reward"""
     
     # Algorithm specific arguments
-    total_timesteps: int = 2000000
+    total_timesteps: int = 10000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -120,6 +120,9 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, n_obs, n_act, device=None):
         super().__init__()
+        
+        # n_obs now includes both current state and target state (goal-conditioned)
+        # n_obs = 2 * spatial_size (current_state + target_state)
         
         # Use MLP for critic network (outputs 1 value)
         self.critic = MLP(
@@ -309,7 +312,16 @@ if __name__ == "__main__":
     ####### Environment setup #######
     # Create vectorized environment
     if args.env_id == "BurgersVec-v0":
-        env = BurgersOnTheFlyVecEnv(num_envs=args.num_envs)
+        env = BurgersOnTheFlyVecEnv(
+            num_envs=args.num_envs,
+            spatial_size=args.spatial_size,
+            num_time_points=args.num_time_points,
+            viscosity=args.viscosity,
+            sim_time=args.sim_time,
+            time_step=args.time_step,
+            forcing_terms_scaling_factor=args.forcing_terms_scaling_factor,
+            mse_scaling_factor=args.mse_scaling_factor
+        )
     else:
         raise ValueError(f"Environment {args.env_id} not found")
     # Observation and action space dimensions

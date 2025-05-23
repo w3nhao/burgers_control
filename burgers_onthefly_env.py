@@ -50,8 +50,9 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         single_action_space = spaces.Box(
             low=-10.0, high=10.0, shape=(self.spatial_size,), dtype=np.float32
         )
+        # Observation space now includes both current state and target state
         single_observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.spatial_size,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(2 * self.spatial_size,), dtype=np.float32
         )
         
         # Initialize the VectorEnv with proper spaces
@@ -246,11 +247,15 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                     reset_idx += 1
         
         # Convert to numpy for gym interface - must move to CPU first
-        observations = self.current_state.cpu().numpy()
+        current_states = self.current_state.cpu().numpy()
+        target_states = self.target_state.cpu().numpy()
+        
+        # Concatenate current state and target state for goal-conditioned observation
+        observations = np.concatenate([current_states, target_states], axis=1)
         
         # Prepare info dict
         info = {
-            "target_state": self.target_state.cpu().numpy(),
+            "target_state": target_states,
             "initial_state": self.initial_state.cpu().numpy(),
         }
         
@@ -306,11 +311,16 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         errors = ((self.current_state - self.target_state)**2).mean(dim=1).cpu().numpy()
         
         # Convert states to numpy for gym interface - must move to CPU first
-        observations = self.current_state.cpu().numpy()
+        current_states = self.current_state.cpu().numpy()
+        target_states = self.target_state.cpu().numpy()
+        
+        # Concatenate current state and target state for goal-conditioned observation
+        observations = np.concatenate([current_states, target_states], axis=1)
         
         # Prepare info dict
         info = {
-            "target_state": self.target_state.cpu().numpy(),
+            "current_state": current_states,
+            "target_state": target_states,
             "time_step": self.current_time.copy(),
             "error": errors,
         }
