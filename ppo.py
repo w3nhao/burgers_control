@@ -29,6 +29,7 @@ from burgers_onthefly_env import BurgersOnTheFlyVecEnv
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
+from mlp import MLP
 
 @dataclass
 class Args:
@@ -119,21 +120,37 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, n_obs, n_act, device=None):
         super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(n_obs, 64, device=device)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64, device=device)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1, device=device), std=1.0),
+        
+        # Use MLP for critic network (outputs 1 value)
+        self.critic = MLP(
+            in_dim=n_obs,
+            out_dim=1,
+            hidden_dims=[2048, 2048],
+            act_fn=nn.ReLU,
+            norm_fn=nn.Identity,
+            dropout_rate=0.0,
+            use_input_residual=True,
+            use_bias=True
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(n_obs, 64, device=device)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64, device=device)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, n_act, device=device), std=0.01),
+        
+        # Use MLP for actor mean network (outputs n_act actions)
+        self.actor_mean = MLP(
+            in_dim=n_obs,
+            out_dim=n_act,
+            hidden_dims=[2048, 2048],
+            act_fn=nn.ReLU,
+            norm_fn=nn.Identity,
+            dropout_rate=0.0,
+            use_input_residual=True,
+            use_bias=True
         )
+        
         self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
+        
+        # Move networks to device if specified
+        if device is not None:
+            self.critic = self.critic.to(device)
+            self.actor_mean = self.actor_mean.to(device)
 
     def get_value(self, x):
         return self.critic(x)
