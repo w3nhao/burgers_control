@@ -32,7 +32,7 @@ def create_differential_matrices_1d(grid_size):
     return first_deriv, second_deriv
 
 def simulate_burgers_equation(initial_conditions, forcing_terms, viscosity, sim_time, 
-                             time_step=1e-4, num_time_points=10):
+                             time_step=1e-4, num_time_points=10, print_progress=False):
     """
     Simulates Burgers' equation with forcing terms.
     
@@ -46,6 +46,7 @@ def simulate_burgers_equation(initial_conditions, forcing_terms, viscosity, sim_
                         The simulation uses much smaller time_step internally but only records
                         the state at evenly spaced intervals. The output will have num_time_points+1
                         time points (including the initial condition).
+        print_progress: Whether to print progress bar
         
     Returns:
         tensor: Simulated trajectories (N, num_time_points+1, s)
@@ -104,7 +105,7 @@ def simulate_burgers_equation(initial_conditions, forcing_terms, viscosity, sim_
     forcing_index = -1
     
     # Main simulation loop
-    for step in tqdm.trange(total_steps, desc="Simulating Burgers' equation"):
+    for step in tqdm.trange(total_steps, desc="Simulating Burgers' equation", disable=not print_progress):
         # Remove boundary values and repad to maintain consistent size
         state = state[..., 1:-1]
         state = F.pad(state, (1, 1))
@@ -321,12 +322,12 @@ def test_one_time_point_simulation():
     spatial_size = 64
     num_time_points = 5
     viscosity = 0.01
-    sim_time = 0.1
+    sim_time = 1.0
     time_step = 1e-4
     
     # Generate initial conditions and forcing terms
     initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
-        num_samples, num_samples, spatial_size, num_time_points
+        num_samples, num_samples, spatial_size, num_time_points, scaling_factor=1.0, max_time=sim_time
     )
     
     # Run full simulation

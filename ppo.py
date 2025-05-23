@@ -25,12 +25,10 @@ import wandb
 from utils import load_environment_variables
 load_environment_variables()
 
-from burgers_vec_env import BurgersVecEnv
-
+from burgers_onthefly_env import BurgersOnTheFlyVecEnv
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
-
 
 @dataclass
 class Args:
@@ -45,16 +43,32 @@ class Args:
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
-    # Algorithm specific arguments
+    # Environment specific arguments
     env_id: str = "BurgersVec-v0"
     """the id of the environment"""
-    total_timesteps: int = 200000
+    spatial_size: int = 128
+    """the spatial size of the environment"""
+    num_time_points: int = 10
+    """the number of time points of trajectory in the environment"""
+    viscosity: float = 0.01
+    """the viscosity of the Burgers' equation"""
+    sim_time: float = 0.1
+    """the total time of simulation"""
+    time_step: float = 1e-4
+    """the time step of simulation"""
+    forcing_terms_scaling_factor: float = 1.0
+    """the scaling factor of the forcing terms"""   
+    mse_scaling_factor: float = 1e4
+    """the scaling factor of the MSE reward"""
+    
+    # Algorithm specific arguments
+    total_timesteps: int = 2000000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 1024
     """the number of parallel game environments"""
-    num_steps: int = 64
+    num_steps: int = 10
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -62,7 +76,7 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
+    num_minibatches: int = 4
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -72,7 +86,7 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0
+    ent_coef: float = 1e-2
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -92,18 +106,15 @@ class Args:
     measure_burnin: int = 3
     """Number of burn-in iterations for speed measure."""
 
-    compile: bool = False
+    compile: bool = True
     """whether to use torch.compile."""
-    cudagraphs: bool = False
+    cudagraphs: bool = True
     """whether to use cudagraphs on top of compile."""
-
-
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
-
 
 class Agent(nn.Module):
     def __init__(self, n_obs, n_act, device=None):
@@ -168,10 +179,8 @@ def rollout(obs, done, avg_returns=[]):
     for step in range(args.num_steps):
         # ALGO LOGIC: action logic
         action, logprob, _, value = policy(obs=obs)
-
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, reward, next_done, infos = step_func(action)
-
         if "final_info" in infos:
             for info in infos["final_info"]:
                 r = float(info["episode"]["r"].reshape(()))
@@ -218,7 +227,7 @@ def update(obs, actions, logprobs, advantages, returns, vals):
     pg_loss1 = -advantages * ratio
     pg_loss2 = -advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-
+    
     # Value loss
     newvalue = newvalue.view(-1)
     if args.clip_vloss:
@@ -283,7 +292,7 @@ if __name__ == "__main__":
     ####### Environment setup #######
     # Create vectorized environment
     if args.env_id == "BurgersVec-v0":
-        env = BurgersVecEnv(num_envs=args.num_envs)
+        env = BurgersOnTheFlyVecEnv(num_envs=args.num_envs)
     else:
         raise ValueError(f"Environment {args.env_id} not found")
     # Observation and action space dimensions
@@ -330,7 +339,7 @@ if __name__ == "__main__":
 
     if args.cudagraphs:
         policy = CudaGraphModule(policy)
-        gae = CudaGraphModule(gae)
+        # gae = CudaGraphModule(gae)
         update = CudaGraphModule(update)
 
     avg_returns = deque(maxlen=20)
@@ -379,11 +388,19 @@ if __name__ == "__main__":
             speed = (global_step - global_step_burnin) / (time.time() - start_time)
             r = container["rewards"].mean()
             r_max = container["rewards"].max()
-            avg_returns_t = torch.tensor(avg_returns).mean()
+            
+            # Handle empty avg_returns to avoid NaN
+            if len(avg_returns) > 0:
+                avg_returns_t = torch.tensor(avg_returns).mean()
+                episode_return_mean = np.array(avg_returns).mean()
+            else:
+                print("WARNING: No episodes completed yet")
+                avg_returns_t = torch.tensor(0.0)
+                episode_return_mean = 0.0
 
             with torch.no_grad():
                 logs = {
-                    "episode_return": np.array(avg_returns).mean(),
+                    "episode_return": episode_return_mean,
                     "logprobs": container["logprobs"].mean(),
                     "advantages": container["advantages"].mean(),
                     "returns": container["returns"].mean(),
@@ -396,7 +413,7 @@ if __name__ == "__main__":
                 f"speed: {speed: 4.1f} sps, "
                 f"reward avg: {r :4.2f}, "
                 f"reward max: {r_max:4.2f}, "
-                f"returns: {avg_returns_t: 4.2f},"
+                f"returns: {avg_returns_t: 4.2f} ({len(avg_returns)} episodes),"
                 f"lr: {lr: 4.2f}"
             )
             wandb.log(
@@ -404,28 +421,3 @@ if __name__ == "__main__":
             )
             
     env.close()
-    
-    torch.save(agent.state_dict(), "ppo_burgers_vectorized_model.pt")
-
-    # Final evaluation using 
-    eval_env = BurgersVecEnv(num_envs=50, mode="test")
-    
-    obs, _ = eval_env.reset()
-    obs = torch.tensor(obs, dtype=torch.float32, device=device)
-    done = torch.zeros(eval_env.num_envs, device=device, dtype=torch.bool)
-    total_reward = 0
-    
-    while not done.all():
-        with torch.no_grad():
-            action, _, _, _ = agent.get_action_and_value(obs)
-        
-        obs, reward, done, truncated, info = eval_env.step(action.cpu().numpy())
-        obs = torch.tensor(obs, dtype=torch.float32, device=device)
-        total_reward += reward
-        
-        if done.all():
-            eval_mse = info['error']
-            
-    print(f"Total reward: {total_reward}")
-    print(f"Evaluation MSE: {np.mean(eval_mse)}")
-

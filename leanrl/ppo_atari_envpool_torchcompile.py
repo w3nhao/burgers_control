@@ -27,9 +27,33 @@ from torch.distributions.categorical import Categorical, Distribution
 
 Distribution.set_default_validate_args(False)
 
-# This is a quick fix while waiting for https://github.com/pytorch/pytorch/pull/138080 to land
-Categorical.logits = property(Categorical.__dict__["logits"].wrapped)
-Categorical.probs = property(Categorical.__dict__["probs"].wrapped)
+# Better fix for Categorical attribute setting issue compatible with torch.compile
+class FixedCategorical(Categorical):
+    def __init__(self, probs=None, logits=None, validate_args=None):
+        if logits is not None:
+            # Store logits and compute probs from logits
+            self._logits = logits
+            # Normalize logits to prevent overflow
+            logits_normalized = logits - logits.logsumexp(dim=-1, keepdim=True)
+            probs = torch.nn.functional.softmax(logits_normalized, dim=-1)
+        
+        # Initialize parent with probs only
+        super(Categorical, self).__init__(probs, validate_args=validate_args)
+        
+        # Set additional attributes if logits were provided
+        if hasattr(self, '_logits'):
+            # Store the normalized logits
+            object.__setattr__(self, '_stored_logits', self._logits - self._logits.logsumexp(dim=-1, keepdim=True))
+    
+    @property
+    def logits(self):
+        if hasattr(self, '_stored_logits'):
+            return self._stored_logits
+        return self.probs.log()
+
+# Replace the original Categorical with our fixed version
+torch.distributions.categorical.Categorical = FixedCategorical
+Categorical = FixedCategorical
 
 torch.set_float32_matmul_precision("high")
 
@@ -166,7 +190,14 @@ class Agent(nn.Module):
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(hidden)
+        
+        # Clone tensors to avoid CUDA graph overwriting issues
+        action_cloned = action.clone()
+        log_prob_cloned = probs.log_prob(action).clone()
+        entropy_cloned = probs.entropy().clone()
+        value_cloned = self.critic(hidden).clone()
+        
+        return action_cloned, log_prob_cloned, entropy_cloned, value_cloned
 
 
 def gae(next_obs, next_done, container):
@@ -349,12 +380,14 @@ if __name__ == "__main__":
     # Compile policy
     if args.compile:
         mode = "reduce-overhead" if not args.cudagraphs else None
-        policy = torch.compile(policy, mode=mode)
-        gae = torch.compile(gae, fullgraph=True, mode=mode)
+        # Don't compile policy to avoid CUDA graph tensor access issues
+        # policy = torch.compile(policy, mode=mode)
+        # Don't compile gae to avoid CUDA graph tensor access issues
+        # gae = torch.compile(gae, fullgraph=True, mode=mode)
         update = torch.compile(update, mode=mode)
 
     if args.cudagraphs:
-        policy = CudaGraphModule(policy, warmup=20)
+        # policy = CudaGraphModule(policy, warmup=20)
         #gae = CudaGraphModule(gae, warmup=20)
         update = CudaGraphModule(update, warmup=20)
 
@@ -384,6 +417,7 @@ if __name__ == "__main__":
 
         torch.compiler.cudagraph_mark_step_begin()
         container = gae(next_obs, next_done, container)
+        import pdb; pdb.set_trace()
         container_flat = container.view(-1)
 
         # Optimizing the policy and value network

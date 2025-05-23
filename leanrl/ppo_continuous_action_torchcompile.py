@@ -45,7 +45,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 8
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -328,7 +328,7 @@ if __name__ == "__main__":
 
     if args.cudagraphs:
         policy = CudaGraphModule(policy)
-        gae = CudaGraphModule(gae)
+        # gae = CudaGraphModule(gae)
         update = CudaGraphModule(update)
 
     avg_returns = deque(maxlen=20)
@@ -356,6 +356,7 @@ if __name__ == "__main__":
         global_step += container.numel()
 
         container = gae(next_obs, next_done, container)
+        import pdb; pdb.set_trace()
         container_flat = container.view(-1)
 
         # Optimizing the policy and value network

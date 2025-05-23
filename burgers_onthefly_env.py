@@ -13,7 +13,6 @@ from burgers import (
     simulate_burgers_equation
 )
 
-
 class BurgersOnTheFlyVecEnv(VectorEnv):
     """
     Vectorized Burgers Equation Environment that generates data on-the-fly.
@@ -28,8 +27,9 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                  viscosity: float = 0.01,
                  sim_time: float = 0.1,
                  time_step: float = 1e-4,
-                 scaling_factor: float = 1.0,
-                 max_time: float = 1.0):
+                 forcing_terms_scaling_factor: float = 1.0,
+                 mse_scaling_factor: float = 1e4
+                 ):
         """
         Initialize the vectorized on-the-fly Burgers Equation Environment
         
@@ -40,8 +40,8 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             viscosity: Viscosity coefficient
             sim_time: Total physical simulation time
             time_step: Physical simulation time step size
-            scaling_factor: Scaling factor for forcing terms
-            max_time: Maximum simulation time
+            forcing_terms_scaling_factor: Scaling factor for forcing terms
+            mse_scaling_factor: Scaling factor for MSE reward
         """
         self.spatial_size = spatial_size
         self.num_time_points = num_time_points
@@ -65,8 +65,8 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         self.viscosity = viscosity
         self.sim_time = sim_time
         self.time_step = time_step
-        self.scaling_factor = scaling_factor
-        self.max_time = max_time
+        self.forcing_terms_scaling_factor = forcing_terms_scaling_factor
+        self.mse_scaling_factor = mse_scaling_factor
         self.current_time = np.zeros(num_envs, dtype=int)
         
         # Define domain and step sizes
@@ -95,6 +95,10 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         
         # Track actions for validation - list of lists, one per environment
         self.actions_history = [[] for _ in range(num_envs)]
+        
+        # Episode tracking for final info records
+        self.cumulative_rewards = np.zeros(num_envs, dtype=np.float32)
+        self.episode_lengths = np.zeros(num_envs, dtype=int)
         
         # Using CPU by default, can be moved to GPU if needed
         self.device = torch.device("cpu")
@@ -139,7 +143,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         forcing_with_boundary = F.pad(forcing_terms, (1, 1))
         
         # Simulate the required number of small time steps
-        for _ in range(self.steps_per_sim):
+        for sim_step in range(self.steps_per_sim):
             # Remove boundary values and repad to maintain consistent size
             states_with_boundary = states_with_boundary[..., 1:-1]
             states_with_boundary = F.pad(states_with_boundary, (1, 1))
@@ -149,15 +153,19 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             transport_term = torch.einsum('nsi,si->ns', squared_state[..., self.transport_indices], self.transport_coeffs)
             diffusion_term = torch.einsum('nsi,si->ns', states_with_boundary[..., self.diffusion_indices], self.diffusion_coeffs)
             
-            # Update state using Euler step
-            states_with_boundary = states_with_boundary + self.time_step * (
+            # Calculate update
+            update_term = self.time_step * (
                 -(1/2) * transport_term + 
                 diffusion_term + 
                 forcing_with_boundary
             )
+            
+            # Update state using Euler step
+            states_with_boundary = states_with_boundary + update_term
         
         # Return state without boundary
-        return states_with_boundary[..., 1:-1]
+        result = states_with_boundary[..., 1:-1]
+        return result
 
     def reset(self, 
               mask: Optional[np.ndarray] = None, 
@@ -201,7 +209,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             # Generate initial conditions and forcing terms for environments to reset
             initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
                 num_to_reset, num_to_reset, self.spatial_size, self.num_time_points,
-                scaling_factor=self.scaling_factor, max_time=self.max_time
+                scaling_factor=self.forcing_terms_scaling_factor, max_time=self.sim_time
             )
             
             # Move to device
@@ -211,7 +219,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             # Simulate forward to get target states
             trajectories = simulate_burgers_equation(
                 initial_conditions, forcing_terms, self.viscosity, self.sim_time,
-                time_step=self.time_step, num_time_points=self.num_time_points
+                time_step=self.time_step, num_time_points=self.num_time_points,
             )
             
             # Extract target states (final state of simulation)
@@ -230,6 +238,10 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                     
                     # Reset time counter
                     self.current_time[i] = 0
+                    
+                    # Reset episode tracking
+                    self.cumulative_rewards[i] = 0.0
+                    self.episode_lengths[i] = 0
                     
                     reset_idx += 1
         
@@ -252,7 +264,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             actions: Actions to take in each environment with shape [num_envs, spatial_size]
             
         Returns:
-            observations: Next states
+            observations: Next states (auto-reset for terminated environments)
             rewards: Rewards for the actions
             terminations: Whether episodes are terminated
             truncations: Whether episodes are truncated
@@ -276,13 +288,16 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         
         # Calculate rewards
         rewards = np.zeros(self.num_envs, dtype=np.float32)
+
+        # Use exp(-MSE) as the reward for each environment
+        mse_per_env = ((self.current_state - self.target_state)**2).mean(dim=1)  # Shape: [num_envs]
+        # Scale MSE to make rewards more distinguishable
+        scaled_mse = mse_per_env * self.mse_scaling_factor  # Scale factor can be adjusted
+        rewards = np.exp(-scaled_mse.cpu().numpy())  # Shape: [num_envs]
         
-        # For terminated environments, calculate reward based on final state
-        for i in range(self.num_envs):
-            if terminations[i]:
-                # Use negative MSE as the reward
-                mse = ((self.current_state[i] - self.target_state[i])**2).mean().cpu().item()
-                rewards[i] = -mse
+        # Update episode tracking
+        self.cumulative_rewards += rewards
+        self.episode_lengths += 1
         
         # No truncations in this environment as mentioned in the requirements
         truncations = np.zeros(self.num_envs, dtype=bool)
@@ -299,6 +314,46 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             "time_step": self.current_time.copy(),
             "error": errors,
         }
+        
+        # Add final info for terminated environments and auto-reset
+        if np.any(terminations):
+            final_info = []
+            for i in range(self.num_envs):
+                if terminations[i]:
+                    # Record final episode statistics
+                    episode_info = {
+                        "episode": {
+                            "r": self.cumulative_rewards[i],  # Total episode reward in numpy float32
+                            "l": self.episode_lengths[i],     # Episode length in numpy int32
+                            "final_error": errors[i],         # Final MSE error in numpy float32
+                            "final_mse": errors[i],           # Same as final_error (compatibility) in numpy float32
+                            "initial_state": self.initial_state[i].cpu().numpy().copy(),
+                            "final_state": self.current_state[i].cpu().numpy().copy(),
+                            "target_state": self.target_state[i].cpu().numpy().copy(),
+                            "initial_vs_target_mse": ((self.initial_state[i] - self.target_state[i])**2).mean().cpu().numpy(),
+                            "final_vs_target_mse": errors[i], # Same as final_error (compatibility) in numpy float32
+                            "improvement": ((self.initial_state[i] - self.target_state[i])**2).mean().cpu().numpy() - errors[i]
+                        }
+                    }
+                    final_info.append(episode_info)
+                else:
+                    final_info.append(None)
+            info["final_info"] = final_info
+            
+            # Auto-reset terminated environments
+            reset_obs, reset_info = self.reset(mask=terminations)
+            
+            # Update observations for terminated environments with reset observations
+            for i in range(self.num_envs):
+                if terminations[i]:
+                    observations[i] = reset_obs[i]
+            
+            # Update info with reset information for terminated environments
+            info["target_state"] = self.target_state.cpu().numpy()  # Update with new targets
+            info["time_step"] = self.current_time.copy()  # Update with reset time steps
+        
+        # Reset episode tracking for terminated environments (already done in reset)
+        # Note: reset() already handles resetting cumulative_rewards and episode_lengths
         
         return observations, rewards, terminations, truncations, info
     
@@ -364,8 +419,7 @@ def make_burgers_onthefly_vec_env(
     viscosity=0.01,
     sim_time=0.1,
     time_step=1e-4,
-    scaling_factor=1.0,
-    max_time=1.0
+    forcing_terms_scaling_factor=1.0
 ):
     """
     Create a vectorized Burgers equation environment with on-the-fly data generation
@@ -377,8 +431,7 @@ def make_burgers_onthefly_vec_env(
         viscosity: Viscosity coefficient
         sim_time: Total physical simulation time
         time_step: Physical simulation time step size
-        scaling_factor: Scaling factor for forcing terms
-        max_time: Maximum simulation time
+        forcing_terms_scaling_factor: Scaling factor for forcing terms
         
     Returns:
         BurgersOnTheFlyVecEnv: A vectorized Burgers equation environment
@@ -390,6 +443,5 @@ def make_burgers_onthefly_vec_env(
         viscosity=viscosity,
         sim_time=sim_time,
         time_step=time_step,
-        scaling_factor=scaling_factor,
-        max_time=max_time
+        forcing_terms_scaling_factor=forcing_terms_scaling_factor
     ) 
