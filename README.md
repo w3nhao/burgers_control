@@ -143,3 +143,148 @@ WANDB_BASE_URL=https://api.wandb.ai  # Or your custom wandb URL if applicable
 ```
 
 The environment variables will be loaded automatically when running any of the training scripts.
+
+
+# Policy Pretraining System for Burgers Equation
+
+This directory contains a policy pretraining system that allows you to first train a policy using supervised learning on the BurgersDataset, then continue training with PPO.
+
+## Overview
+
+The pretraining system consists of two main scripts:
+
+1. **`pretrain_policy.py`**: Trains a policy network using supervised learning on state transition data
+2. **`ppo_pretrain_policy.py`**: Modified PPO script that can load and continue training a pretrained policy
+
+## How It Works
+
+### Pretraining Phase (`pretrain_policy.py`)
+
+The pretraining script creates a supervised learning dataset from the BurgersDataset by:
+
+1. **Creating State Transition Pairs**: For each trajectory in the dataset, it creates tuples of `(s_prev, s_next, action)` where:
+   - `s_prev`: State at time t
+   - `s_next`: State at time t+1  
+   - `action`: The action/forcing term that caused the transition from `s_prev` to `s_next`
+
+2. **Training Objective**: The policy network learns to predict the action given the concatenated state transition `[s_prev, s_next]`
+
+3. **Network Architecture**: Uses the same MLP architecture as the PPO actor network for compatibility
+
+### PPO Fine-tuning Phase (`ppo_pretrain_policy.py`)
+
+The modified PPO script can:
+
+1. **Load Pretrained Policy**: Load the pretrained policy weights and use them as initialization for the actor network
+2. **Separate Learning Rates**: Use different learning rates for policy (pretrained) and critic (from scratch) parameters
+3. **Continue Training**: Continue training with PPO reinforcement learning
+
+## Usage
+
+### Step 1: Pretrain the Policy
+
+```bash
+# Basic pretraining with default parameters
+python pretrain_policy.py
+
+# Customize pretraining parameters
+python pretrain_policy.py --learning_rate 1e-4 --batch_size 512 --num_epochs 50
+
+# Limit training data for faster experimentation
+python pretrain_policy.py --max_samples 10000
+
+# Specify GPU device
+python pretrain_policy.py --cuda 0
+```
+
+**Key Arguments for Pretraining:**
+- `--learning_rate`: Learning rate for supervised learning (default: 1e-4)
+- `--batch_size`: Batch size for training (default: 512)
+- `--num_epochs`: Number of training epochs (default: 100)
+- `--max_samples`: Limit number of state transition samples (default: None for all)
+- `--train_split`: Fraction of data for training vs validation (default: 0.8)
+- `--save_dir`: Directory to save models (default: "pretrained_models")
+
+### Step 2: Continue Training with PPO
+
+```bash
+# Train PPO from scratch (baseline)
+python ppo_pretrain_policy.py
+
+# Train PPO with pretrained policy
+python ppo_pretrain_policy.py --pretrained_policy_path pretrained_models/pretrain_policy__1__20240101_120000_best.pt
+
+# Customize learning rates for policy vs critic
+python ppo_pretrain_policy.py \
+    --pretrained_policy_path pretrained_models/pretrain_policy__1__20240101_120000_best.pt \
+    --policy_learning_rate_multiplier 0.1 \
+    --critic_learning_rate_multiplier 1.0
+```
+
+**Key Arguments for PPO with Pretraining:**
+- `--pretrained_policy_path`: Path to pretrained policy model (None for training from scratch)
+- `--policy_learning_rate_multiplier`: LR multiplier for policy parameters (default: 0.1)
+- `--critic_learning_rate_multiplier`: LR multiplier for critic parameters (default: 1.0)
+- `--critic_hidden_dims`: Hidden dimensions for critic (None to use same as policy)
+- `--critic_act_fn`: Activation function for critic (None to use same as policy)
+
+## Expected Benefits
+
+1. **Faster Convergence**: Pretrained policy should converge faster than training from scratch
+2. **Better Sample Efficiency**: Policy starts with reasonable behavior learned from demonstrations
+3. **More Stable Training**: Pretraining provides a good initialization point for RL
+
+## File Structure
+
+```
+pretrained_models/           # Directory for saved pretrained models
+├── pretrain_policy__1__20240101_120000_best.pt      # Best model during training
+├── pretrain_policy__1__20240101_120000_final.pt     # Final model after training
+└── pretrain_policy__1__20240101_120000_epoch_10.pt  # Periodic checkpoints
+```
+
+## Model Compatibility
+
+The pretrained policy network has:
+- **Input**: Concatenated state transition `[s_prev, s_next]` (shape: 2 × spatial_size)
+- **Output**: Predicted action/forcing terms (shape: spatial_size)
+- **Architecture**: Same MLP structure as PPO actor for seamless integration
+
+## Monitoring Training
+
+Both scripts log to Weights & Biases (wandb):
+- **Pretraining**: Project "burgers_policy_pretrain"
+- **PPO**: Project "ppo_continuous_action"
+
+Key metrics to monitor:
+- **Pretraining**: `train_loss`, `val_loss`, `learning_rate`
+- **PPO**: `episode_return`, `policy_lr`, `critic_lr`, `r` (reward)
+
+## Example Workflow
+
+```bash
+# 1. Pretrain policy for 50 epochs
+python pretrain_policy.py --num_epochs 50 --learning_rate 1e-4
+
+# 2. Find the best model path from the output
+# Example: pretrained_models/pretrain_policy__1__20240101_120000_best.pt
+
+# 3. Train PPO with pretrained policy
+python ppo_pretrain_policy.py \
+    --pretrained_policy_path pretrained_models/pretrain_policy__1__20240101_120000_best.pt \
+    --policy_learning_rate_multiplier 0.1 \
+    --num_envs 4096 \
+    --total_timesteps 50000000
+
+# 4. Compare with baseline (no pretraining)
+python ppo_pretrain_policy.py \
+    --num_envs 4096 \
+    --total_timesteps 50000000
+```
+
+## Notes
+
+- The pretraining splits the train dataset internally (80/20 by default) - it doesn't use the test dataset
+- The critic is always trained from scratch since it's not pretrained
+- Different learning rates for policy vs critic allow fine-tuning of pretrained vs randomly initialized components
+- All models are saved with the `save_load` decorator for easy loading and metadata tracking 

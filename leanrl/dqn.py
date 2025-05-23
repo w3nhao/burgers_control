@@ -104,7 +104,7 @@ if __name__ == "__main__":
     import stable_baselines3 as sb3
     
     # Load environment variables from .env file
-    from utils import load_environment_variables
+    from utils.utils import load_environment_variables
     load_environment_variables()
 
     if sb3.__version__ < "2.0":

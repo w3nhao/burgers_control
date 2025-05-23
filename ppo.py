@@ -9,7 +9,7 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -22,7 +22,7 @@ import tyro
 import wandb
 
 # Import utility function to load environment variables
-from utils import load_environment_variables
+from utils.utils import load_environment_variables
 load_environment_variables()
 
 from burgers_onthefly_env import BurgersOnTheFlyVecEnv
@@ -30,6 +30,7 @@ from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
 from layers import MLP, get_activation_fn
+from pretrain_policy import PolicyNetwork
 
 import datetime
 
@@ -41,10 +42,8 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    cuda: int = 7
+    """cuda device to use"""
 
     # Environment specific arguments
     env_id: str = "BurgersVec-v0"
@@ -61,7 +60,7 @@ class Args:
     """the time step of simulation"""
     forcing_terms_scaling_factor: float = 1.0
     """the scaling factor of the forcing terms"""   
-    mse_scaling_factor: float = 1e4
+    mse_scaling_factor: float = 1e3
     """the scaling factor of the MSE reward"""
     
     # Model specific arguments
@@ -70,22 +69,38 @@ class Args:
     act_fn: str = "gelu"
     """the activation function of the MLP"""
     
+    # Pretrained policy loading arguments
+    pretrained_policy_path: Optional[str] = None
+    """path to pretrained policy model (None to start from scratch)"""
+    freeze_policy_layers: bool = False
+    """whether to freeze some layers of the pretrained policy during training"""
+    policy_learning_rate_multiplier: float = 1.0
+    """learning rate multiplier for pretrained policy parameters"""
+    
+    # Critic specific arguments (since critic is not pretrained)
+    critic_hidden_dims: Optional[List[int]] = None
+    """hidden dimensions for critic network (None to use same as policy)"""
+    critic_act_fn: Optional[str] = None
+    """activation function for critic network (None to use same as policy)"""
+    critic_learning_rate_multiplier: float = 1.0
+    """learning rate multiplier for critic parameters"""
+    
     # Algorithm specific arguments
-    total_timesteps: int = 10000000
+    total_timesteps: int = 100000000
     """total timesteps of the experiments"""
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-5
     """the learning rate of the optimizer"""
-    num_envs: int = 1024
+    num_envs: int = 8192
     """the number of parallel game environments"""
     num_steps: int = 10
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
-    gamma: float = 0.99
+    gamma: float = 1
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
+    num_minibatches: int = 256
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
@@ -95,7 +110,7 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 1e-2
+    ent_coef: float = 1e-5
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -126,39 +141,62 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Agent(nn.Module):
-    def __init__(self, n_obs, n_act, device=None, hidden_dims=None, act_fn=None):
+    def __init__(self, n_obs, n_act, device=None, hidden_dims=None, act_fn=None, 
+                 critic_hidden_dims=None, critic_act_fn=None,
+                 pretrained_policy_path=None):
         super().__init__()
         
         # n_obs now includes both current state and target state (goal-conditioned)
         # n_obs = 2 * spatial_size (current_state + target_state)
         
+        # Set default critic parameters if not provided
+        if critic_hidden_dims is None:
+            critic_hidden_dims = hidden_dims
+        if critic_act_fn is None:
+            critic_act_fn = act_fn
+        
         # Use MLP for critic network (outputs 1 value)
         self.critic = MLP(
             in_dim=n_obs,
             out_dim=1,
-            hidden_dims=hidden_dims,
-            act_fn=get_activation_fn(act_fn),
+            hidden_dims=critic_hidden_dims,
+            act_fn=get_activation_fn(critic_act_fn),
             norm_fn=nn.Identity,
             dropout_rate=0.0,
             use_input_residual=True,
             use_bias=True
         )
         
-        # Use MLP for actor mean network (outputs n_act actions)
-        self.actor_mean = MLP(
-            in_dim=n_obs,
-            out_dim=n_act,
-            hidden_dims=hidden_dims,
-            act_fn=get_activation_fn(act_fn),
-            norm_fn=nn.Identity,
-            dropout_rate=0.0,
-            use_input_residual=True,
-            use_bias=True
-        )
+        # Load pretrained policy or create new one
+        if pretrained_policy_path is not None:
+            print(f"Loading pretrained policy from {pretrained_policy_path}")
+            # Load the pretrained policy network
+            pretrained_policy, metadata = PolicyNetwork.init_and_load(
+                pretrained_policy_path, 
+                device=device
+            )
+            print(f"Loaded pretrained policy with metadata: {metadata}")
+            
+            # Use the pretrained policy network as actor_mean
+            self.actor_mean = pretrained_policy.policy_net
+            print("Successfully loaded pretrained policy network")
+            
+        else:
+            print("Creating new policy network from scratch")
+            # Use MLP for actor mean network (outputs n_act actions)
+            self.actor_mean = MLP(
+                in_dim=n_obs,
+                out_dim=n_act,
+                hidden_dims=hidden_dims,
+                act_fn=get_activation_fn(act_fn),
+                norm_fn=nn.Identity,
+                dropout_rate=0.0,
+                use_input_residual=True,
+                use_bias=True
+            )
         
         self.actor_logstd = nn.Parameter(torch.zeros(1, n_act, device=device))
         
-        # Move networks to device if specified
         if device is not None:
             self.critic = self.critic.to(device)
             self.actor_mean = self.actor_mean.to(device)
@@ -289,7 +327,7 @@ update = tensordict.nn.TensorDictModule(
 
 if __name__ == "__main__":
     # Load environment variables from .env file
-    from utils import load_environment_variables
+    from utils.utils import load_environment_variables
     load_environment_variables()
     
     args = tyro.cli(Args)
@@ -300,7 +338,13 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     
     exp_start_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{exp_start_time}"
+    
+    # Include pretrained policy info in run name
+    pretrain_suffix = ""
+    if args.pretrained_policy_path:
+        pretrain_suffix = "_pretrained"
+    
+    run_name = f"{args.env_id}__{args.exp_name}{pretrain_suffix}__{args.seed}__{exp_start_time}"
 
     wandb.init(
         project="ppo_continuous_action",
@@ -316,7 +360,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     ####### Environment setup #######
@@ -332,6 +376,8 @@ if __name__ == "__main__":
             forcing_terms_scaling_factor=args.forcing_terms_scaling_factor,
             mse_scaling_factor=args.mse_scaling_factor
         )
+        # Move environment to the same device as the neural network
+        env.set_device(device)
     else:
         raise ValueError(f"Environment {args.env_id} not found")
     # Observation and action space dimensions
@@ -351,19 +397,70 @@ if __name__ == "__main__":
         )
         
     ####### Agent #######
-    agent = Agent(n_obs, n_act, device=device, hidden_dims=args.hidden_dims, act_fn=args.act_fn)
+    agent = Agent(
+        n_obs, 
+        n_act, 
+        device=device, 
+        hidden_dims=args.hidden_dims, 
+        act_fn=args.act_fn,
+        critic_hidden_dims=args.critic_hidden_dims,
+        critic_act_fn=args.critic_act_fn,
+        pretrained_policy_path=args.pretrained_policy_path
+    )
+    
     # Make a version of agent with detached params
-    agent_inference = Agent(n_obs, n_act, device=device, hidden_dims=args.hidden_dims, act_fn=args.act_fn)
+    agent_inference = Agent(
+        n_obs, 
+        n_act, 
+        device=device, 
+        hidden_dims=args.hidden_dims, 
+        act_fn=args.act_fn,
+        critic_hidden_dims=args.critic_hidden_dims,
+        critic_act_fn=args.critic_act_fn,
+        pretrained_policy_path=args.pretrained_policy_path
+    )
     agent_inference_p = from_module(agent).data
     agent_inference_p.to_module(agent_inference)
 
     ####### Optimizer #######
+    # Create separate parameter groups for policy and critic with different learning rates
+    policy_params = []
+    critic_params = []
+    
+    # Add actor parameters to policy group
+    for name, param in agent.named_parameters():
+        if 'actor_mean' in name or 'actor_logstd' in name:
+            policy_params.append(param)
+        elif 'critic' in name:
+            critic_params.append(param)
+        else:
+            # Default to policy group for any other parameters
+            policy_params.append(param)
+    
+    # Setup parameter groups with different learning rates
+    param_groups = [
+        {
+            'params': policy_params, 
+            'lr': torch.tensor(args.learning_rate * args.policy_learning_rate_multiplier, device=device),
+            'name': 'policy'
+        },
+        {
+            'params': critic_params, 
+            'lr': torch.tensor(args.learning_rate * args.critic_learning_rate_multiplier, device=device),
+            'name': 'critic'
+        }
+    ]
+    
     optimizer = optim.Adam(
-        agent.parameters(),
-        lr=torch.tensor(args.learning_rate, device=device),
+        param_groups,
         eps=1e-5,
         capturable=args.cudagraphs and not args.compile,
     )
+    
+    print(f"Policy parameters: {len(policy_params)}")
+    print(f"Critic parameters: {len(critic_params)}")
+    print(f"Policy learning rate: {args.learning_rate * args.policy_learning_rate_multiplier}")
+    print(f"Critic learning rate: {args.learning_rate * args.critic_learning_rate_multiplier}")
 
     ####### Executables #######
     # Define networks: wrapping the policy in a TensorDictModule allows us to use CudaGraphModule
@@ -377,9 +474,13 @@ if __name__ == "__main__":
         update = torch.compile(update)
 
     if args.cudagraphs:
-        policy = CudaGraphModule(policy)
-        # gae = CudaGraphModule(gae)
-        update = CudaGraphModule(update)
+        if device.type == 'cuda':
+            policy = CudaGraphModule(policy, device=device)
+            # gae = CudaGraphModule(gae, device=device)
+            update = CudaGraphModule(update, device=device)
+        else:
+            print("Warning: CUDA graphs requested but CUDA is not available. Skipping CUDA graph optimization.")
+            args.cudagraphs = False
 
     avg_returns = deque(maxlen=20)
     global_step = 0
@@ -399,8 +500,13 @@ if __name__ == "__main__":
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"].copy_(lrnow)
+            # Update learning rates for all parameter groups
+            for group in optimizer.param_groups:
+                if group['name'] == 'policy':
+                    lrnow = frac * args.learning_rate * args.policy_learning_rate_multiplier
+                else:  # critic
+                    lrnow = frac * args.learning_rate * args.critic_learning_rate_multiplier
+                group["lr"].copy_(lrnow)
 
         torch.compiler.cudagraph_mark_step_begin()
         next_obs, next_done, container = rollout(next_obs, next_done, avg_returns=avg_returns)
@@ -447,16 +553,28 @@ if __name__ == "__main__":
                     "gn": out["gn"].mean(),
                 }
 
-            lr = optimizer.param_groups[0]["lr"]
+            # Get learning rates for each group
+            policy_lr = optimizer.param_groups[0]["lr"]
+            critic_lr = optimizer.param_groups[1]["lr"]
+            
             pbar.set_description(
                 f"speed: {speed: 4.1f} sps, "
                 f"reward avg: {r :4.2f}, "
                 f"reward max: {r_max:4.2f}, "
-                f"returns: {avg_returns_t: 4.2f} ({len(avg_returns)} episodes),"
-                f"lr: {lr: 4.2f}"
+                f"returns: {avg_returns_t: 4.2f} ({len(avg_returns)} episodes), "
+                f"policy_lr: {policy_lr: 4.2f}, critic_lr: {critic_lr: 4.2f}"
             )
             wandb.log(
-                {"speed": speed, "episode_return": avg_returns_t, "r": r, "r_max": r_max, "lr": lr, **logs}, step=global_step
+                {
+                    "speed": speed, 
+                    "episode_return": avg_returns_t, 
+                    "r": r, 
+                    "r_max": r_max, 
+                    "policy_lr": policy_lr,
+                    "critic_lr": critic_lr,
+                    **logs
+                }, 
+                step=global_step
             )
             
-    env.close()
+    env.close() 
