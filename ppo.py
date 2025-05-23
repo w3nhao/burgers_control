@@ -9,7 +9,7 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 import gymnasium as gym
 import numpy as np
@@ -31,6 +31,7 @@ from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
 from layers import MLP, get_activation_fn
 from pretrain_policy import PolicyNetwork
+from utils.save_load import save_load
 
 import datetime
 
@@ -42,7 +43,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: int = 7
+    cuda: int = 1
     """cuda device to use"""
 
     # Environment specific arguments
@@ -59,7 +60,9 @@ class Args:
     time_step: float = 1e-4
     """the time step of simulation"""
     forcing_terms_scaling_factor: float = 1.0
-    """the scaling factor of the forcing terms"""   
+    """the scaling factor of the forcing terms"""
+    reward_type: str = "exp_scaled_mse"
+    """the type of reward function to use"""
     mse_scaling_factor: float = 1e3
     """the scaling factor of the MSE reward"""
     
@@ -134,12 +137,21 @@ class Args:
     """whether to use torch.compile."""
     cudagraphs: bool = True
     """whether to use cudagraphs on top of compile."""
+    
+    # Model saving arguments
+    save_every: int = 100
+    """save agent every N iterations (0 to disable saving)"""
+    save_dir: str = "checkpoints"
+    """directory to save agent checkpoints"""
+    save_final: bool = True
+    """whether to save the final agent at the end of training"""
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+@save_load(version="1.0.0")
 class Agent(nn.Module):
     def __init__(self, n_obs, n_act, device=None, hidden_dims=None, act_fn=None, 
                  critic_hidden_dims=None, critic_act_fn=None,
@@ -325,6 +337,26 @@ update = tensordict.nn.TensorDictModule(
     out_keys=["approx_kl", "v_loss", "pg_loss", "entropy_loss", "old_approx_kl", "clipfrac", "gn"],
 )
 
+def load_saved_agent(checkpoint_path: str, device: Optional[torch.device] = None) -> Tuple[Agent, Dict[str, Any]]:
+    """
+    Load a saved PPO agent from checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the saved agent checkpoint
+        device: Device to load the agent on (if None, uses same device as saved)
+        
+    Returns:
+        Tuple of (loaded_agent, metadata)
+        
+    Example:
+        agent, metadata = load_saved_agent("checkpoints/run_name/agent_final.pt")
+        print(f"Loaded agent from iteration {metadata['iteration']}")
+    """
+    agent, metadata = Agent.init_and_load(checkpoint_path, device=device)
+    print(f"Loaded agent from {checkpoint_path}")
+    print(f"Metadata: {metadata}")
+    return agent, metadata
+
 if __name__ == "__main__":
     # Load environment variables from .env file
     from utils.utils import load_environment_variables
@@ -363,6 +395,13 @@ if __name__ == "__main__":
     device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
+    # Setup save directory
+    save_path = None
+    if args.save_every > 0 or args.save_final:
+        save_path = os.path.join(args.save_dir, run_name)
+        os.makedirs(save_path, exist_ok=True)
+        print(f"Save directory: {save_path}")
+    
     ####### Environment setup #######
     # Create vectorized environment
     if args.env_id == "BurgersVec-v0":
@@ -374,6 +413,7 @@ if __name__ == "__main__":
             sim_time=args.sim_time,
             time_step=args.time_step,
             forcing_terms_scaling_factor=args.forcing_terms_scaling_factor,
+            reward_type=args.reward_type,
             mse_scaling_factor=args.mse_scaling_factor
         )
         # Move environment to the same device as the neural network
@@ -576,5 +616,44 @@ if __name__ == "__main__":
                 }, 
                 step=global_step
             )
+            
+        # Save agent checkpoint at specified intervals
+        if args.save_every > 0 and iteration % args.save_every == 0 and save_path is not None:
+            checkpoint_path = os.path.join(save_path, f"agent_iteration_{iteration}.pt")
+            try:
+                agent.save(
+                    checkpoint_path,
+                    save_optimizer=True,
+                    optimizer=optimizer,
+                    metadata={
+                        "iteration": iteration,
+                        "global_step": global_step,
+                        "episode_return_mean": episode_return_mean if len(avg_returns) > 0 else 0.0,
+                        "args": vars(args)
+                    }
+                )
+                print(f"Saved agent checkpoint at iteration {iteration}: {checkpoint_path}")
+            except Exception as e:
+                print(f"Warning: Failed to save checkpoint at iteration {iteration}: {e}")
+            
+    # Save final agent checkpoint
+    if args.save_final and save_path is not None:
+        final_checkpoint_path = os.path.join(save_path, "agent_final.pt")
+        try:
+            agent.save(
+                final_checkpoint_path,
+                save_optimizer=True,
+                optimizer=optimizer,
+                metadata={
+                    "iteration": args.num_iterations,
+                    "global_step": global_step,
+                    "episode_return_mean": episode_return_mean if len(avg_returns) > 0 else 0.0,
+                    "args": vars(args),
+                    "final_checkpoint": True
+                }
+            )
+            print(f"Saved final agent checkpoint: {final_checkpoint_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save final checkpoint: {e}")
             
     env.close() 

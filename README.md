@@ -288,3 +288,150 @@ python ppo_pretrain_policy.py \
 - The critic is always trained from scratch since it's not pretrained
 - Different learning rates for policy vs critic allow fine-tuning of pretrained vs randomly initialized components
 - All models are saved with the `save_load` decorator for easy loading and metadata tracking 
+
+
+
+# PPO Agent Checkpoint Save/Load Functionality
+
+This document explains how to use the checkpoint save/load functionality that has been added to the PPO training script.
+
+## Overview
+
+The PPO agent now supports automatic saving and loading of checkpoints during training, including:
+- Model weights (actor and critic networks)
+- Optimizer state
+- Training metadata (iteration, global step, episode returns, etc.)
+- Complete training configuration
+
+## Save Configuration
+
+The following arguments control the saving behavior:
+
+### Command Line Arguments
+
+- `--save_every`: Save agent every N iterations (default: 1000, set to 0 to disable periodic saving)
+- `--save_dir`: Directory to save agent checkpoints (default: "checkpoints")
+- `--save_final`: Whether to save the final agent at the end of training (default: True)
+
+### Examples
+
+```bash
+# Save every 500 iterations to custom directory
+python ppo.py --save_every 500 --save_dir my_checkpoints
+
+# Disable periodic saving, only save final model
+python ppo.py --save_every 0 --save_final True
+
+# Save every 2000 iterations
+python ppo.py --save_every 2000
+```
+
+## Checkpoint Structure
+
+Checkpoints are saved in the following directory structure:
+
+```
+checkpoints/
+└── BurgersVec-v0__ppo__1__20240101_120000/
+    ├── agent_iteration_1000.pt
+    ├── agent_iteration_2000.pt
+    ├── agent_iteration_3000.pt
+    └── agent_final.pt
+```
+
+Each checkpoint file contains:
+- Model state dict (actor_mean, actor_logstd, critic)
+- Optimizer state dict
+- Training metadata (iteration, global step, episode returns)
+- Complete training arguments for reproducibility
+- Version information for compatibility checking
+
+## Loading Saved Agents
+
+### Using the Helper Function
+
+```python
+from ppo import load_saved_agent
+
+# Load a saved agent
+agent, metadata = load_saved_agent("checkpoints/run_name/agent_final.pt")
+
+# Print training information
+print(f"Loaded agent from iteration {metadata['iteration']}")
+print(f"Episode return mean: {metadata['episode_return_mean']}")
+```
+
+### Manual Loading
+
+```python
+from ppo import Agent
+
+# Load agent using the built-in method
+agent, metadata = Agent.init_and_load("path/to/checkpoint.pt", device="cuda:0")
+```
+
+## Testing Saved Agents
+
+Use the provided example script to test saved agents:
+
+```bash
+# Test a saved agent
+python load_agent_example.py --checkpoint_path checkpoints/run_name/agent_final.pt
+
+# Test with specific device and number of episodes
+python load_agent_example.py \
+    --checkpoint_path checkpoints/run_name/agent_final.pt \
+    --device cuda:0 \
+    --num_episodes 10
+```
+
+## Resuming Training
+
+To resume training from a checkpoint, you would need to:
+
+1. Load the saved agent
+2. Extract the optimizer state
+3. Continue training from the saved iteration
+
+Example pattern:
+
+```python
+# Load checkpoint
+agent, metadata = load_saved_agent("path/to/checkpoint.pt")
+
+# Extract training state
+start_iteration = metadata['iteration']
+saved_args = metadata['args']
+
+# Resume training from this point
+# (implementation depends on your specific requirements)
+```
+
+## Best Practices
+
+1. **Regular Saving**: Use `--save_every 1000` or similar to save regularly during long training runs
+2. **Backup Important Checkpoints**: The save system creates backups automatically, but consider manual backups for critical runs
+3. **Version Compatibility**: The save system includes version information to help with compatibility across different code versions
+4. **Storage Management**: Monitor disk usage, as checkpoints can be large (especially with large networks and optimizer states)
+
+## Metadata Information
+
+Each checkpoint includes comprehensive metadata:
+
+```python
+metadata = {
+    'iteration': 5000,
+    'global_step': 1280000,
+    'episode_return_mean': 45.67,
+    'version': '1.0.0',
+    'torch_version': '2.0.1',
+    'args': {
+        'spatial_size': 128,
+        'hidden_dims': [1024, 1024, 1024],
+        'learning_rate': 1e-5,
+        # ... all training arguments
+    }
+}
+```
+
+This ensures you can always reproduce the exact training configuration and understand the context of any saved model. 

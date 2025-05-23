@@ -28,7 +28,8 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                  sim_time: float = 0.1,
                  time_step: float = 1e-4,
                  forcing_terms_scaling_factor: float = 1.0,
-                 mse_scaling_factor: float = 1e4
+                 reward_type: str = "vanilla",
+                 mse_scaling_factor: float = 1e3
                  ):
         """
         Initialize the vectorized on-the-fly Burgers Equation Environment
@@ -41,10 +42,13 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             sim_time: Total physical simulation time
             time_step: Physical simulation time step size
             forcing_terms_scaling_factor: Scaling factor for forcing terms
+            reward_type: Type of reward function to use (vanilla, inverse_mse, exp_scaled_mse)
             mse_scaling_factor: Scaling factor for MSE reward
         """
         self.spatial_size = spatial_size
         self.num_time_points = num_time_points
+        self.reward_type = reward_type
+        self.mse_scaling_factor = mse_scaling_factor
         
         # Define action and observation spaces
         single_action_space = spaces.Box(
@@ -67,7 +71,6 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         self.sim_time = sim_time
         self.time_step = time_step
         self.forcing_terms_scaling_factor = forcing_terms_scaling_factor
-        self.mse_scaling_factor = mse_scaling_factor
         self.current_time = np.zeros(num_envs, dtype=int)
         
         # Define domain and step sizes
@@ -291,14 +294,34 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         # Check if episodes are done
         terminations = (self.current_time >= self.num_time_points)
         
-        # Calculate rewards
-        rewards = np.zeros(self.num_envs, dtype=np.float32)
-
-        # Use exp(-MSE) as the reward for each environment
-        mse_per_env = ((self.current_state - self.target_state)**2).mean(dim=1)  # Shape: [num_envs]
-        # Scale MSE to make rewards more distinguishable
-        scaled_mse = mse_per_env * self.mse_scaling_factor  # Scale factor can be adjusted
-        rewards = np.exp(-scaled_mse.cpu().numpy())  # Shape: [num_envs]
+        if self.reward_type == "vanilla":
+            # Calculate rewards as negative MSE
+            # This naturally maps MSE to (0, 1] range without manual scaling:
+            # - MSE = 0 → reward = 0.0 (perfect match)
+            # - MSE = 1 → reward = -1.0
+            # - MSE = 9 → reward = -9.0
+            # - MSE → ∞ → reward → -∞
+            rewards = -((self.current_state - self.target_state)**2).mean(dim=1).cpu().numpy()
+        elif self.reward_type == "inverse_mse":
+            # Calculate rewards using inverse relationship: reward = 1 / (1 + MSE)
+            # This naturally maps MSE to (0, 1] range without manual scaling:
+            # - MSE = 0 → reward = 1.0 (perfect match)
+            # - MSE = 1 → reward = 0.5 
+            # - MSE = 9 → reward = 0.1
+            # - MSE → ∞ → reward → 0
+            mse_per_env = ((self.current_state - self.target_state)**2).mean(dim=1)  # Shape: [num_envs]
+            rewards = (1.0 / (1.0 + mse_per_env)).cpu().numpy()  # Shape: [num_envs]
+        elif self.reward_type == "exp_scaled_mse":
+            # Calculate rewards using exponential relationship: reward = exp(-MSE * scaling_factor)
+            # This naturally maps MSE to (0, 1] range without manual scaling:
+            # - MSE = 0 → reward = 1.0 (perfect match)
+            # - MSE = 1 → reward = 0.36787944117144233
+            # - MSE = 9 → reward = 0.00012340980408667956
+            # - MSE → ∞ → reward → 0
+            mse_per_env = ((self.current_state - self.target_state)**2).mean(dim=1)  # Shape: [num_envs]
+            rewards = np.exp(-mse_per_env * self.mse_scaling_factor).cpu().numpy()  # Shape: [num_envs]
+        else:
+            raise ValueError(f"Invalid reward type: {self.reward_type}")
         
         # Update episode tracking
         self.cumulative_rewards += rewards
