@@ -6,7 +6,7 @@ the Burgers partial differential equation using various neural network architect
 """
 
 __version__ = "0.1.0"
-__author__ = "Your Name"
+__author__ = "Wenhao Deng"
 
 # Import main modules for easy access
 from .burgers import *
