@@ -122,6 +122,232 @@ python -m burgers_control.eval_on_env --checkpoint_path path/to/agent.pt
 - Logging configuration
 - Environment variable management
 
+## Data Generation
+
+The package includes comprehensive tools for generating Burgers equation datasets with controlled trajectories and forcing terms. This is essential for training agents that can control PDE dynamics.
+
+### Quick Start with Data Generation
+
+```bash
+# Generate small test dataset (100 training, 10 test trajectories)
+python -m burgers_control.burgers --mode small --validate
+
+# Generate full production dataset (100k training, 50 test trajectories)  
+python -m burgers_control.burgers --mode full --batch_size 8192
+
+# Test simulation consistency
+python -m burgers_control.burgers --mode test
+```
+
+### Data Generation Modes
+
+#### 1. Small Dataset (Development & Testing)
+Generates a small dataset for development and validation:
+
+```bash
+python -m burgers_control.burgers \
+    --mode small \
+    --seed 42 \
+    --validate \
+    --train_file "../1d_burgers/burgers_train_small" \
+    --test_file "../1d_burgers/unsafe_test_small"
+```
+
+**Parameters:**
+- 100 training trajectories 
+- 10 test trajectories
+- Includes automatic validation with environment consistency check
+- Fast generation for testing workflows
+
+#### 2. Full Production Dataset
+Generates the complete dataset for training production models:
+
+```bash
+python -m burgers_control.burgers \
+    --mode full \
+    --seed 42 \
+    --batch_size 8192 \
+    --train_file "../1d_burgers/burgers_train_new" \
+    --test_file "../1d_burgers/unsafe_test_new"
+```
+
+**Parameters:**
+- 100,000 training trajectories
+- 50 test trajectories  
+- Memory-efficient batch processing
+- Full logging and progress tracking
+
+#### 3. Simulation Validation
+Tests that simulation algorithms are working correctly:
+
+```bash
+python -m burgers_control.burgers --mode test --seed 42
+```
+
+Validates that step-by-step simulation matches full trajectory simulation (should have MSE < 1e-5).
+
+### Generated Data Structure
+
+The data generation creates two main outputs:
+
+#### Training Data Format
+- **Trajectories**: `(N, T+1, spatial_size)` - State evolution over time
+- **Actions**: `(N, T, spatial_size)` - Forcing terms at each time step  
+- **Rewards**: `(N, T)` - Rewards for each transition
+- **Targets**: `(N, spatial_size)` - Final target states
+
+#### Test Data Format  
+- **Trajectories**: `(N, T+1, spatial_size)` - Full state trajectories
+- **Targets**: `(N, spatial_size)` - Target states (final states)
+- Used for evaluation without actions (ground truth comparison)
+
+### Data Generation Parameters
+
+#### Physical Parameters
+```bash
+--spatial_size 128          # Spatial grid points (default: 128)
+--num_time_points 10        # Time steps per trajectory (default: 10)  
+--viscosity 0.01            # PDE viscosity coefficient (default: 0.01)
+--sim_time 0.1              # Physical simulation time (default: 0.1)
+--time_step 1e-4            # Simulation time step (default: 1e-4)
+```
+
+#### Generation Parameters
+```bash
+--seed 42                   # Random seed for reproducibility
+--batch_size 8192          # Trajectories per batch (memory management)
+--train_file path/to/train # Custom training data path
+--test_file path/to/test   # Custom test data path  
+--log_file path/to/log     # Custom log file path
+```
+
+### Data Storage Formats
+
+The package supports two storage formats:
+
+#### 1. Hugging Face Datasets (Default)
+```python
+from datasets import load_from_disk
+
+# Load training data
+dataset = load_from_disk("../1d_burgers/burgers_train_new")
+dataset.set_format("torch")
+
+trajectories = dataset['trajectories']  # State evolution
+actions = dataset['actions']           # Forcing terms
+```
+
+#### 2. HDF5 Format (Fallback)
+We are not going to use this format in the future.
+```python
+import h5py
+
+# Load training data  
+with h5py.File("../1d_burgers/burgers_train_new.h5", 'r') as hdf:
+    u_data = hdf['train']['pde_11-128'][:]     # Trajectories
+    f_data = hdf['train']['pde_11-128_f'][:]   # Actions
+```
+
+### Python API for Data Generation
+
+#### Generate Custom Training Data
+```python
+from burgers_control.burgers import generate_training_data
+
+u_data, f_data = generate_training_data(
+    num_trajectories=1000,
+    num_time_points=10,
+    spatial_size=128,
+    viscosity=0.01,
+    sim_time=0.1,
+    seed=42,
+    train_file_path="../data/custom_train"
+)
+```
+
+#### Generate Test Data
+```python
+from burgers_control.burgers import generate_test_data
+
+test_trajectories = generate_test_data(
+    num_trajectories=50,
+    num_time_points=10,
+    spatial_size=128,
+    viscosity=0.01,
+    sim_time=0.1,
+    seed=42,
+    test_file_path="../data/custom_test"
+)
+```
+
+#### Custom Initial Conditions and Forcing Terms
+```python
+from burgers_control.burgers import make_initial_conditions_and_varying_forcing_terms
+
+initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
+    num_initial_conditions=100,
+    num_forcing_terms=100,
+    spatial_size=128,
+    num_time_points=10,
+    amplitude_compensation=2,
+    scaling_factor=1.0,
+    max_time=0.1,
+    seed=42
+)
+```
+
+### Data Validation
+
+#### Environment Consistency Check
+```bash
+# Should return MSE ≈ 0 (perfect consistency)
+python -m burgers_control.eval_on_testset --num_trajectories 5
+```
+
+#### Simulation Algorithm Validation  
+```bash
+# Validates step-by-step vs full simulation
+python -m burgers_control.burgers --mode test
+```
+
+### Generated Data Characteristics
+
+#### Initial Conditions
+- **Dual Gaussian bumps**: Positive and negative Gaussian distributions
+- **Spatial locations**: Randomly positioned in domain [0, 1]
+- **Amplitudes**: Random magnitudes creating diverse initial states
+- **Ensures variety**: Wide range of initial PDE states for robust training
+
+#### Forcing Terms (Actions)
+- **Spatio-temporal structure**: Gaussian distributions in both space and time
+- **Multi-component**: Sum of multiple random Gaussian components
+- **Controllable regions**: Option for partial spatial control
+- **Realistic dynamics**: Physically meaningful forcing patterns
+
+#### Simulation Quality
+- **High-order finite differences**: 2nd order boundary conditions
+- **Stable time stepping**: Euler method with small time steps
+- **Boundary handling**: Proper zero Dirichlet boundary conditions
+- **Validation**: Extensive consistency checking
+
+### Memory Management
+
+For large dataset generation:
+
+```bash
+# Use smaller batch sizes for limited memory
+python -m burgers_control.burgers --mode full --batch_size 1024
+
+# Monitor memory usage during generation
+python -m burgers_control.burgers --mode full --batch_size 8192
+```
+
+The batch processing automatically manages memory by:
+- Processing trajectories in chunks
+- Releasing memory between batches  
+- Concatenating results efficiently
+- Providing progress tracking
+
 ## Training Workflows
 
 ### 1. Basic PPO Training
