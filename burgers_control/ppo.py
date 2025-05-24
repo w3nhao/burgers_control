@@ -25,7 +25,6 @@ import wandb
 from burgers_control.utils.utils import load_environment_variables
 load_environment_variables()
 
-from burgers_control.env_configs import create_env, get_env_config, list_env_configs
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
@@ -387,52 +386,30 @@ if __name__ == "__main__":
         print(f"Save directory: {save_path}")
     
     ####### Environment setup #######
-    # Create vectorized environment using either legacy configs or Gymnasium registration
+    # Create vectorized environment using Gymnasium registration system
     try:
-        # Try legacy environment configs first for backward compatibility
-        env = create_env(args.env_id, num_envs=args.num_envs)
-        # Move environment to the same device as the neural network
+        from burgers_control.register import get_environment_kwargs
+        from burgers_control.burgers_onthefly_env import make_burgers_vec_env
+        
+        # Get environment kwargs from Gymnasium registration
+        env_kwargs = get_environment_kwargs(args.env_id)
+        env = make_burgers_vec_env(num_envs=args.num_envs, **env_kwargs)
         env.set_device(device)
-        print(f"Created environment {args.env_id} with configuration (legacy system):")
-        config = get_env_config(args.env_id)
-        print(f"  - spatial_size: {config.spatial_size}")
-        print(f"  - num_time_points: {config.num_time_points}")
-        print(f"  - viscosity: {config.viscosity}")
-        print(f"  - sim_time: {config.sim_time}")
-        print(f"  - time_step: {config.time_step}")
-        print(f"  - reward_type: {config.reward_type}")
-    except ValueError as e:
-        # Fallback to Gymnasium registration system
+        
+        print(f"Created environment {args.env_id} with configuration:")
+        for key, value in env_kwargs.items():
+            print(f"  - {key}: {value}")
+            
+    except (ImportError, ValueError) as e:
+        print(f"Error creating environment {args.env_id}: {e}")
+        print("Available environments:")
         try:
-            from burgers_control.register import get_environment_kwargs
-            from burgers_control.burgers_env import make_burgers_vec_env
-            
-            # Get environment kwargs from Gymnasium registration
-            env_kwargs = get_environment_kwargs(args.env_id)
-            env = make_burgers_vec_env(num_envs=args.num_envs, **env_kwargs)
-            env.set_device(device)
-            
-            print(f"Created environment {args.env_id} with configuration (Gymnasium system):")
-            for key, value in env_kwargs.items():
-                print(f"  - {key}: {value}")
-                
-        except (ImportError, ValueError) as gym_error:
-            print(f"Error creating environment with legacy system: {e}")
-            print(f"Error creating environment with Gymnasium system: {gym_error}")
-            print("Available environments (legacy):")
-            try:
-                for env_name, env_config in list_env_configs().items():
-                    print(f"  - {env_name}: {env_config}")
-            except:
-                pass
-            print("Available environments (Gymnasium):")
-            try:
-                from burgers_control.register import list_registered_environments
-                for env_name in list_registered_environments():
-                    print(f"  - {env_name}")
-            except:
-                pass
-            raise ValueError(f"Could not create environment {args.env_id}")
+            from burgers_control.register import list_registered_environments
+            for env_name in list_registered_environments():
+                print(f"  - {env_name}")
+        except:
+            pass
+        raise ValueError(f"Could not create environment {args.env_id}")
             
     # Observation and action space dimensions
     n_obs = env.single_observation_space.shape[0]
