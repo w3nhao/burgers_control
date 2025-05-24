@@ -53,14 +53,14 @@ burgers-train \
     --total_timesteps 50000000 \
     --learning_rate 1e-5
 
-# Evaluate trained agent on test dataset  
+# Evaluate trained agent on test dataset (requires explicit test file path)
 burgers-eval \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
     --test_file_path /path/to/test/dataset \
     --num_trajectories 50 \
     --mode final_state
 
-# Environment validation using training data
+# Environment validation using training data (requires explicit training file path)
 burgers-eval \
     --train_file_path /path/to/training/dataset \
     --num_trajectories 50
@@ -70,7 +70,7 @@ burgers-eval-env \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
     --num_episodes 5
 
-# Pretrain policy with supervised learning
+# Pretrain policy with supervised learning (requires explicit training file path)
 burgers-pretrain \
     --train_file_path /path/to/training/dataset \
     --exp_name "policy_pretrain" \
@@ -98,19 +98,19 @@ agent, metadata = load_saved_agent("path/to/checkpoint.pt")
 # Train PPO agent
 python -m burgers_control.ppo --num_envs 8192
 
-# Evaluate on test dataset (requires --test_file_path)
+# Evaluate on test dataset (requires explicit --test_file_path)
 python -m burgers_control.eval_on_testset \
     --checkpoint_path path/to/agent.pt \
     --test_file_path path/to/test/dataset
 
-# Environment validation (requires --train_file_path)
+# Environment validation (requires explicit --train_file_path)
 python -m burgers_control.eval_on_testset \
     --train_file_path path/to/training/dataset
 
 # Environment evaluation 
 python -m burgers_control.eval_on_env --checkpoint_path path/to/agent.pt
 
-# Policy pretraining (requires --train_file_path)
+# Policy pretraining (requires explicit --train_file_path)
 python -m burgers_control.pretrain_policy \
     --train_file_path path/to/training/dataset \
     --exp_name "pretrain_experiment"
@@ -147,20 +147,32 @@ python -m burgers_control.pretrain_policy \
 
 ## Data Generation
 
+**Important Note:** All data generation commands require explicit output file paths specified as parameters. File paths are no longer configured via environment variables.
+
 The package includes comprehensive tools for generating Burgers equation datasets with controlled trajectories and forcing terms. This is essential for training agents that can control PDE dynamics.
 
 ### Quick Start with Data Generation
 
 ```bash
 # Generate small test dataset (100 training, 10 test trajectories)
-python -m burgers_control.burgers --mode small --validate
+python -m burgers_control.burgers \
+    --mode small \
+    --train_file "/path/to/save/burgers_train_small" \
+    --test_file "/path/to/save/burgers_test_small" \
+    --validate
 
 # Generate full production dataset (100k training, 50 test trajectories)  
-python -m burgers_control.burgers --mode full --batch_size 8192
+python -m burgers_control.burgers \
+    --mode full \
+    --train_file "/path/to/save/burgers_train_full" \
+    --test_file "/path/to/save/burgers_test_full" \
+    --batch_size 8192
 
 # Generate custom dataset with specific parameters
 python -m burgers_control.burgers \
     --mode full \
+    --train_file "/path/to/save/custom_train" \
+    --test_file "/path/to/save/custom_test" \
     --num_train_trajectories 50000 \
     --num_test_trajectories 25 \
     --spatial_size 256 \
@@ -168,7 +180,7 @@ python -m burgers_control.burgers \
     --sim_time 0.8 \
     --seed 123
 
-# Test simulation consistency
+# Test simulation consistency (uses default temporary files)
 python -m burgers_control.burgers --mode test
 ```
 
@@ -541,6 +553,8 @@ burgers-train \
 
 ## Evaluation
 
+**Important Note:** All evaluation commands require explicit file path parameters. Use `--test_file_path` for agent evaluation on test datasets and `--train_file_path` for environment validation.
+
 ### Test Dataset Evaluation
 
 The evaluation script supports two goal-conditioned modes:
@@ -667,16 +681,24 @@ Edit `.env` with your settings:
 # Weights & Biases
 WANDB_API_KEY=your_wandb_key
 WANDB_ENTITY=your_entity
-
-# NOTE: Dataset file paths are no longer environment variables!
-# Use --train_file_path and --test_file_path parameters instead.
 ```
 
-**Important:** Dataset file paths (`BURGERS_TRAIN_FILE_PATH` and `BURGERS_TEST_FILE_PATH`) are no longer configured via environment variables. All scripts now require explicit file path parameters:
+**Important Migration Note:** Dataset file paths are no longer configured via environment variables. All scripts now require explicit file path parameters:
 
-- Use `--train_file_path` for training dataset
-- Use `--test_file_path` for test dataset  
-- Use `--train_file` and `--test_file` for data generation output paths
+- **Removed:** `BURGERS_TRAIN_FILE_PATH` and `BURGERS_TEST_FILE_PATH` environment variables
+- **Required:** Use `--train_file_path` and `--test_file_path` command-line arguments
+- **Migration:** Update your scripts to include explicit file path parameters
+
+**Example migration:**
+```bash
+# Old approach (no longer supported)
+export BURGERS_TRAIN_FILE_PATH="/data/burgers_train"
+python -m burgers_control.eval_on_testset
+
+# New approach (required)
+python -m burgers_control.eval_on_testset \
+    --train_file_path "/data/burgers_train"
+```
 
 This change ensures explicit data dependencies and makes scripts more portable and reproducible.
 
@@ -774,65 +796,3 @@ If you use this package in your research, please cite:
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## File Path Requirements
-
-**Important:** Starting from this version, file paths are specified as **input parameters** rather than environment variables. Each script and function requires explicit file path arguments:
-
-### Required File Path Parameters
-
-#### Data Generation
-```bash
-# All data generation requires explicit output paths
-python -m burgers_control.burgers \
-    --mode full \
-    --train_file "/path/to/save/training/dataset" \
-    --test_file "/path/to/save/test/dataset"
-```
-
-#### Evaluation Scripts
-```bash
-# Agent evaluation requires test dataset path
-burgers-eval \
-    --checkpoint_path /path/to/agent.pt \
-    --test_file_path /path/to/test/dataset
-
-# Environment validation requires training dataset path  
-burgers-eval \
-    --train_file_path /path/to/training/dataset
-```
-
-#### Policy Pretraining
-```bash
-# Pretraining requires training dataset path
-python -m burgers_control.pretrain_policy \
-    --train_file_path /path/to/training/dataset \
-    --exp_name "pretrain_experiment"
-```
-
-### File Path Validation
-
-All functions automatically validate that:
-- File paths are provided when required
-- Files exist and are accessible
-- Dataset parameters match expected simulation parameters
-- Metadata is consistent across training and evaluation
-
-### Migration from Environment Variables
-
-If you previously used environment variables `BURGERS_TRAIN_FILE_PATH` and `BURGERS_TEST_FILE_PATH`, you now need to:
-
-1. **Update your scripts** to include explicit `--train_file_path` and `--test_file_path` arguments
-2. **Remove .env dependencies** - file paths are no longer read from environment variables
-3. **Use absolute paths** or paths relative to your working directory
-
-**Example migration:**
-```bash
-# Old approach (no longer supported)
-export BURGERS_TRAIN_FILE_PATH="/data/burgers_train"
-python -m burgers_control.eval_on_testset
-
-# New approach (required)
-python -m burgers_control.eval_on_testset \
-    --train_file_path "/data/burgers_train"
-```
