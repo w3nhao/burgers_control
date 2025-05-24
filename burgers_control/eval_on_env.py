@@ -65,7 +65,7 @@ def main():
         spatial_size=saved_args.get('spatial_size', 128),
         num_time_points=saved_args.get('num_time_points', 10),
         viscosity=saved_args.get('viscosity', 0.01),
-        sim_time=saved_args.get('sim_time', 0.1),
+        sim_time=saved_args.get('sim_time', 1.0),
         time_step=saved_args.get('time_step', 1e-4),
         forcing_terms_scaling_factor=saved_args.get('forcing_terms_scaling_factor', 1.0),
         reward_type=saved_args.get('reward_type', 'exp_scaled_mse'),

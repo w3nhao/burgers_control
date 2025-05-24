@@ -208,7 +208,7 @@ The data generation creates two main outputs:
 --spatial_size 128          # Spatial grid points (default: 128)
 --num_time_points 10        # Time steps per trajectory (default: 10)  
 --viscosity 0.01            # PDE viscosity coefficient (default: 0.01)
---sim_time 0.1              # Physical simulation time (default: 0.1)
+--sim_time 1.0              # Physical simulation time (default: 1.0)
 --time_step 1e-4            # Simulation time step (default: 1e-4)
 ```
 
@@ -259,7 +259,7 @@ u_data, f_data = generate_training_data(
     num_time_points=10,
     spatial_size=128,
     viscosity=0.01,
-    sim_time=0.1,
+    sim_time=1.0,
     seed=42,
     train_file_path="../data/custom_train"
 )
@@ -274,7 +274,7 @@ test_trajectories = generate_test_data(
     num_time_points=10,
     spatial_size=128,
     viscosity=0.01,
-    sim_time=0.1,
+    sim_time=1.0,
     seed=42,
     test_file_path="../data/custom_test"
 )
@@ -452,7 +452,7 @@ burgers-eval-env \
 - `spatial_size`: Spatial grid points (default: 128)
 - `num_time_points`: Time steps per episode (default: 10)
 - `viscosity`: PDE viscosity coefficient (default: 0.01)
-- `sim_time`: Physical simulation time (default: 0.1)
+- `sim_time`: Physical simulation time (default: 1.0)
 - `reward_type`: Reward function ("vanilla", "inverse_mse", "exp_scaled_mse")
 
 ### Evaluation Parameters

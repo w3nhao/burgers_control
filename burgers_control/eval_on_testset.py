@@ -17,6 +17,14 @@ import argparse
 import torch
 import numpy as np
 import math
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("python-dotenv not available, relying on system environment variables")
+
 from .ppo import load_saved_agent
 from .burgers import (
     create_differential_matrices_1d, 
@@ -72,7 +80,7 @@ def setup_simulation_matrices(spatial_size, viscosity, device):
     return transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step
 
 def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10, 
-                         viscosity=0.01, sim_time=0.1, time_step=1e-4, mode="final_state"):
+                         viscosity=0.01, sim_time=1.0, time_step=1e-4, mode="final_state"):
     """
     Test agent on pre-generated test dataset using one-step simulation.
     
@@ -212,7 +220,7 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     return mean_mse, all_mse_values
 
 def test_environment_with_training_data(device, num_trajectories=50, num_time_points=10,
-                                      viscosity=0.01, sim_time=0.1, time_step=1e-4):
+                                      viscosity=0.01, sim_time=1.0, time_step=1e-4):
     """
     Test environment simulation using actions from training dataset.
     This serves as a sanity check for the environment implementation.
@@ -258,7 +266,7 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
         setup_simulation_matrices(spatial_size, viscosity, device)
     
     # Calculate simulation parameters
-    total_steps = math.ceil(sim_time / time_step)
+    total_steps = math.ceil(1 / time_step)
     record_interval = math.floor(total_steps / num_time_points)
     
     log_info(f"  - Total simulation steps: {total_steps}")
@@ -484,7 +492,7 @@ def main():
                        help="Number of time points for simulation")
     parser.add_argument("--viscosity", type=float, default=0.01,
                        help="Viscosity parameter for simulation")
-    parser.add_argument("--sim_time", type=float, default=0.1,
+    parser.add_argument("--sim_time", type=float, default=1.0,
                        help="Total simulation time")
     parser.add_argument("--time_step", type=float, default=1e-4,
                        help="Time step for simulation")

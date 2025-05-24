@@ -25,7 +25,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                  spatial_size: int = 128,
                  num_time_points: int = 10,
                  viscosity: float = 0.01,
-                 sim_time: float = 0.1,
+                 sim_time: float = 1.0,
                  time_step: float = 1e-4,
                  forcing_terms_scaling_factor: float = 1.0,
                  reward_type: str = "vanilla",
@@ -450,7 +450,7 @@ def make_burgers_onthefly_vec_env(
     spatial_size=64,
     num_time_points=10,
     viscosity=0.01,
-    sim_time=0.1,
+    sim_time=1.0,
     time_step=1e-4,
     forcing_terms_scaling_factor=1.0
 ):

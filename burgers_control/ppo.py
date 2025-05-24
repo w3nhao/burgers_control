@@ -55,7 +55,7 @@ class Args:
     """the number of time points of trajectory in the environment"""
     viscosity: float = 0.01
     """the viscosity of the Burgers' equation"""
-    sim_time: float = 0.1
+    sim_time: float = 1.0
     """the total time of simulation"""
     time_step: float = 1e-4
     """the time step of simulation"""

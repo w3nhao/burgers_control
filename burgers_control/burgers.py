@@ -15,6 +15,13 @@ import sys
 from datetime import datetime
 from .utils.utils import setup_logging, get_logger_functions
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("python-dotenv not available, relying on system environment variables")
+
 try:
     import h5py
 except ImportError:
@@ -416,7 +423,7 @@ def make_initial_conditions_and_varying_forcing_terms(num_initial_conditions, nu
 # ===============================
 
 def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_size=128,
-                          viscosity=0.01, sim_time=0.1, time_step=1e-4, seed=None, 
+                          viscosity=0.01, sim_time=1.0, time_step=1e-4, seed=None, 
                           train_file_path=None, print_progress=False, batch_size=1000):
     """
     Generate training data with initial conditions, intermediate states, and actions.
@@ -497,7 +504,7 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
     return u_data, f_data
 
 def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128,
-                      viscosity=0.01, sim_time=0.1, time_step=1e-4, seed=None,
+                      viscosity=0.01, sim_time=1.0, time_step=1e-4, seed=None,
                       test_file_path=None):
     """
     Generate test data with only initial and final states (no actions).
@@ -570,7 +577,7 @@ def save_training_data_hf(u_data, f_data, file_path):
         'num_time_points': [u_data.shape[1] - 1] * u_data.shape[0],  # Excluding initial condition
         'spatial_size': [u_data.shape[2]] * u_data.shape[0],
         'viscosity': [0.01] * u_data.shape[0],
-        'sim_time': [0.1] * u_data.shape[0],
+        'sim_time': [1.0] * u_data.shape[0],
         'time_step': [1e-4] * u_data.shape[0]
     }
     
@@ -599,7 +606,7 @@ def save_test_data_hf(test_data, file_path):
         'num_time_points': [test_data.shape[1] - 1] * test_data.shape[0],  # Excluding initial condition
         'spatial_size': [test_data.shape[2]] * test_data.shape[0],
         'viscosity': [0.01] * test_data.shape[0],
-        'sim_time': [0.1] * test_data.shape[0],
+        'sim_time': [1.0] * test_data.shape[0],
         'time_step': [1e-4] * test_data.shape[0]
     }
     
@@ -628,7 +635,7 @@ def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_
     num_time_points = 10
     spatial_size = 128
     viscosity = 0.01
-    sim_time = 0.1
+    sim_time = 1.0
     time_step = 1e-4
     
     # Default file paths if not provided
@@ -701,7 +708,7 @@ def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
     num_time_points = 10
     spatial_size = 128
     viscosity = 0.01
-    sim_time = 0.1
+    sim_time = 1.0
     time_step = 1e-4
     
     # Default file paths if not provided
@@ -774,7 +781,7 @@ def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
 # ===============================
 
 # Default solver with pre-set parameters
-burgers_solver = partial(simulate_burgers_equation, viscosity=0.01, sim_time=0.1, time_step=1e-4)
+burgers_solver = partial(simulate_burgers_equation, viscosity=0.01, sim_time=1.0, time_step=1e-4)
 
 def evaluate_model_performance(num_episodes, initial_state, target_state, actions, device):
     """
@@ -992,7 +999,7 @@ if __name__ == "__main__":
                     num_trajectories=5,  # Test with 5 trajectories
                     num_time_points=10,
                     viscosity=0.01,
-                    sim_time=0.1,
+                    sim_time=1.0,
                     time_step=1e-4
                 )
                 
