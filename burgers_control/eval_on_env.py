@@ -9,9 +9,9 @@ Usage:
 import argparse
 import torch
 import numpy as np
-from .ppo import load_saved_agent
-from .burgers_onthefly_env import BurgersOnTheFlyVecEnv
-from .utils.utils import setup_logging, get_logger_functions
+from burgers_control.ppo import load_saved_agent
+from burgers_control.burgers_onthefly_env import BurgersOnTheFlyVecEnv
+from burgers_control.utils.utils import setup_logging, get_logger_functions
 
 # Setup logger with the new elegant pattern
 setup_logging(logger_name="eval_on_env")

@@ -13,14 +13,14 @@ from torch.utils.data import DataLoader, Dataset, random_split
 import tqdm
 import tyro
 import wandb
-from .layers import MLP, get_activation_fn
-from .burgers import BurgersDataset
-from .utils.utils import load_environment_variables
+from burgers_control.layers import MLP, get_activation_fn
+from burgers_control.burgers import BurgersDataset
+from burgers_control.utils.utils import load_environment_variables
 
 BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
 
 # Import save_load decorator for model persistence
-from .utils.save_load import save_load
+from burgers_control.utils.save_load import save_load
 
 @dataclass
 class PretrainArgs:

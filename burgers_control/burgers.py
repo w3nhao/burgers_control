@@ -13,7 +13,7 @@ import random
 import logging
 import sys
 from datetime import datetime
-from .utils.utils import setup_logging, get_logger_functions
+from burgers_control.utils.utils import setup_logging, get_logger_functions
 
 # Load environment variables from .env file
 try:
@@ -86,6 +86,68 @@ def get_squence_data(file_path=BURGERS_TRAIN_FILE_PATH):
     )
     return data
 
+def get_training_data_with_metadata(file_path=BURGERS_TRAIN_FILE_PATH):
+    """
+    Load training dataset with metadata extraction.
+    
+    Args:
+        file_path: Path to the training dataset
+        
+    Returns:
+        tuple: (data_dict, metadata_dict)
+    """
+    # Load dataset using Hugging Face datasets
+    try:
+        dataset = load_from_disk(file_path)
+        dataset.set_format("torch")
+        
+        # Extract data from the dataset
+        u_data = dataset['trajectories'][:40000]  # Limit to 40k as before
+        f_data = dataset['actions'][:40000]
+        
+        # Extract metadata from the first sample (all samples should have the same metadata)
+        metadata = {}
+        if len(dataset) > 0:
+            sample = dataset[0]
+            metadata = {
+                'num_time_points': sample.get('num_time_points', 10),
+                'spatial_size': sample.get('spatial_size', u_data.shape[2]),
+                'viscosity': sample.get('viscosity', 0.01),
+                'sim_time': sample.get('sim_time', 1.0),
+                'time_step': sample.get('time_step', 1e-4)
+            }
+        
+    except Exception as e:
+        print(f"Warning: Could not load dataset from {file_path}. Error: {e}")
+        print("Falling back to HDF5 format...")
+        # Fallback to HDF5 if datasets format doesn't exist
+        with h5py.File(file_path + ".h5", 'r') as hdf:
+            print("Keys: ", list(hdf.keys()))
+            u_data = torch.tensor(hdf['train']['pde_11-128'][:40000])
+            f_data = torch.tensor(hdf['train']['pde_11-128_f'][:40000])
+            
+        # Default metadata for HDF5 format (no metadata stored)
+        metadata = {
+            'num_time_points': 10,
+            'spatial_size': u_data.shape[2],
+            'viscosity': 0.01,
+            'sim_time': 1.0,
+            'time_step': 1e-4
+        }
+        
+    # Calculate rewards and prepare data
+    rewards = -(u_data[:, -1].unsqueeze(1) - u_data[:, 1:]).square().mean(-1)
+    terminals = np.zeros(rewards.shape, dtype=np.bool_)
+    terminals[:, -1] = True
+
+    data = dict(
+        observations=u_data[:, :-1].numpy(),
+        actions=f_data.numpy(),
+        rewards=rewards.numpy(),
+        targets=u_data[:, -1].numpy(),
+    )
+    return data, metadata
+
 def get_test_data(file_path=BURGERS_TEST_FILE_PATH):
     # Load dataset using Hugging Face datasets
     try:
@@ -113,6 +175,64 @@ def get_test_data(file_path=BURGERS_TEST_FILE_PATH):
         targets=targets.numpy(),
     )
     return data
+
+def get_test_data_with_metadata(file_path=BURGERS_TEST_FILE_PATH):
+    """
+    Load test dataset with metadata extraction.
+    
+    Args:
+        file_path: Path to the test dataset
+        
+    Returns:
+        tuple: (data_dict, metadata_dict)
+    """
+    # Load dataset using Hugging Face datasets
+    try:
+        dataset = load_from_disk(file_path)
+        dataset.set_format("torch")
+        
+        # Extract data from the dataset
+        u_test = dataset['trajectories']
+        
+        # Extract metadata from the first sample (all samples should have the same metadata)
+        metadata = {}
+        if len(dataset) > 0:
+            sample = dataset[0]
+            metadata = {
+                'num_time_points': sample.get('num_time_points', 10),
+                'spatial_size': sample.get('spatial_size', u_test.shape[2]),
+                'viscosity': sample.get('viscosity', 0.01),
+                'sim_time': sample.get('sim_time', 1.0),
+                'time_step': sample.get('time_step', 1e-4)
+            }
+        
+    except Exception as e:
+        print(f"Warning: Could not load dataset from {file_path}. Error: {e}")
+        print("Falling back to HDF5 format...")
+        # Fallback to HDF5 if datasets format doesn't exist
+        with h5py.File(file_path + ".h5", 'r') as hdf:
+            u_test = torch.tensor(hdf['test'][:])
+            
+        # Default metadata for HDF5 format (no metadata stored)
+        metadata = {
+            'num_time_points': 10,
+            'spatial_size': u_test.shape[2],
+            'viscosity': 0.01,
+            'sim_time': 1.0,
+            'time_step': 1e-4
+        }
+    
+    rewards = -((u_test[:, -1][:, None, :] - u_test[:, 1:]) ** 2).mean(-1)
+    observations = u_test[:, :-1]
+    targets = u_test[:, -1]
+        
+    data = dict(
+        observations=observations.numpy(),
+        actions=[None] * len(observations),
+        rewards=rewards.numpy(),
+        targets=targets.numpy(),
+    )
+    return data, metadata
 
 class BurgersDataset(torch.utils.data.Dataset):
     def __init__(self, mode: str):
@@ -499,7 +619,7 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
     
     # Save data if path is provided
     if train_file_path is not None:
-        save_training_data_hf(u_data, f_data, train_file_path)
+        save_training_data_hf(u_data, f_data, train_file_path, viscosity=viscosity, sim_time=sim_time, time_step=time_step)
     
     return u_data, f_data
 
@@ -554,11 +674,11 @@ def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128
     
     # Save data if path is provided
     if test_file_path is not None:
-        save_test_data_hf(test_trajectories, test_file_path)
+        save_test_data_hf(test_trajectories, test_file_path, viscosity=viscosity, sim_time=sim_time, time_step=time_step)
     
     return test_trajectories
 
-def save_training_data_hf(u_data, f_data, file_path):
+def save_training_data_hf(u_data, f_data, file_path, viscosity=0.01, sim_time=1.0, time_step=1e-4):
     """Save training data using Hugging Face datasets."""
     log_info(f"Saving training data to {file_path}")
     
@@ -576,9 +696,9 @@ def save_training_data_hf(u_data, f_data, file_path):
         'num_trajectories': [u_data.shape[0]] * u_data.shape[0],
         'num_time_points': [u_data.shape[1] - 1] * u_data.shape[0],  # Excluding initial condition
         'spatial_size': [u_data.shape[2]] * u_data.shape[0],
-        'viscosity': [0.01] * u_data.shape[0],
-        'sim_time': [1.0] * u_data.shape[0],
-        'time_step': [1e-4] * u_data.shape[0]
+        'viscosity': [viscosity] * u_data.shape[0],
+        'sim_time': [sim_time] * u_data.shape[0],
+        'time_step': [time_step] * u_data.shape[0]
     }
     
     # Create dataset
@@ -588,8 +708,9 @@ def save_training_data_hf(u_data, f_data, file_path):
     dataset.save_to_disk(file_path)
     
     log_info(f"Saved training data with shape: {u_data.shape}")
+    log_info(f"Parameters stored: viscosity={viscosity}, sim_time={sim_time}, time_step={time_step}")
 
-def save_test_data_hf(test_data, file_path):
+def save_test_data_hf(test_data, file_path, viscosity=0.01, sim_time=1.0, time_step=1e-4):
     """Save test data using Hugging Face datasets."""
     log_info(f"Saving test data to {file_path}")
     
@@ -605,9 +726,9 @@ def save_test_data_hf(test_data, file_path):
         'num_trajectories': [test_data.shape[0]] * test_data.shape[0],
         'num_time_points': [test_data.shape[1] - 1] * test_data.shape[0],  # Excluding initial condition
         'spatial_size': [test_data.shape[2]] * test_data.shape[0],
-        'viscosity': [0.01] * test_data.shape[0],
-        'sim_time': [1.0] * test_data.shape[0],
-        'time_step': [1e-4] * test_data.shape[0]
+        'viscosity': [viscosity] * test_data.shape[0],
+        'sim_time': [sim_time] * test_data.shape[0],
+        'time_step': [time_step] * test_data.shape[0]
     }
     
     # Create dataset
@@ -617,33 +738,39 @@ def save_test_data_hf(test_data, file_path):
     dataset.save_to_disk(file_path)
     
     log_info(f"Saved test data with shape: {test_data.shape}")
+    log_info(f"Parameters stored: viscosity={viscosity}, sim_time={sim_time}, time_step={time_step}")
 
 def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_path=None,
-                                      log_file_path=None):
-    """Generate a small test dataset for validation."""
+                                      log_file_path=None, num_train_trajectories=100, num_test_trajectories=10,
+                                      num_time_points=10, spatial_size=128, viscosity=0.01, 
+                                      sim_time=1.0, time_step=1e-4):
+    """
+    Generate a small test dataset for validation.
+    
+    Args:
+        seed (int): Random seed for reproducibility
+        train_file_path (str): Path to save training data
+        test_file_path (str): Path to save test data  
+        log_file_path (str): Path to save log file
+        num_train_trajectories (int): Number of training trajectories to generate
+        num_test_trajectories (int): Number of test trajectories to generate
+        num_time_points (int): Number of time points in each trajectory
+        spatial_size (int): Number of spatial grid points
+        viscosity (float): Viscosity coefficient
+        sim_time (float): Total simulation time
+        time_step (float): Time step for simulation
+        
+    Returns:
+        tuple: (train_file_path, test_file_path, log_file_path)
+    """
     # Setup logging
-    if log_file_path is None:
-        log_file_path = f"burgers_small_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logger, actual_log_path = setup_logging(log_file_path, logger_name="burgers_generation", mode="small_dataset")
+    logger, actual_log_path = setup_logging(logger_name="burgers_generation", mode="small_dataset")
+    log_info, log_warning, log_error = get_logger_functions("burgers_generation")
     
     # Set random seeds for reproducibility
     set_random_seeds(seed)
     
     # Small dataset parameters
-    num_train_trajectories = 100
-    num_test_trajectories = 10
-    num_time_points = 10
-    spatial_size = 128
-    viscosity = 0.01
-    sim_time = 1.0
-    time_step = 1e-4
-    
-    # Default file paths if not provided
-    if train_file_path is None:
-        train_file_path = "../1d_burgers/burgers_train_small"
-    if test_file_path is None:
-        test_file_path = "../1d_burgers/unsafe_test_small"
-    
     log_info("="*50)
     log_info("GENERATING SMALL TEST DATASET")
     log_info("="*50)
@@ -654,6 +781,12 @@ def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_
     log_info(f"Train file path: {train_file_path}")
     log_info(f"Test file path: {test_file_path}")
     log_info(f"Log file: {actual_log_path}")
+    
+    # Default file paths if not provided
+    if train_file_path is None:
+        train_file_path = "../1d_burgers/burgers_train_small"
+    if test_file_path is None:
+        test_file_path = "../1d_burgers/unsafe_test_small"
     
     # Generate training data
     u_data, f_data = generate_training_data(
@@ -693,23 +826,36 @@ def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_
     return train_file_path, test_file_path, actual_log_path
 
 def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
-                         log_file_path=None, batch_size=1000):
-    """Generate the full production dataset."""
+                         log_file_path=None, batch_size=1000, 
+                         num_train_trajectories=100000, num_test_trajectories=50,
+                         num_time_points=10, spatial_size=128, viscosity=0.01, 
+                         sim_time=1.0, time_step=1e-4):
+    """
+    Generate the full production dataset.
+    
+    Args:
+        seed (int): Random seed for reproducibility
+        train_file_path (str): Path to save training data
+        test_file_path (str): Path to save test data
+        log_file_path (str): Path to save log file
+        batch_size (int): Number of trajectories to process at a time
+        num_train_trajectories (int): Number of training trajectories to generate
+        num_test_trajectories (int): Number of test trajectories to generate
+        num_time_points (int): Number of time points in each trajectory
+        spatial_size (int): Number of spatial grid points
+        viscosity (float): Viscosity coefficient
+        sim_time (float): Total simulation time
+        time_step (float): Time step for simulation
+        
+    Returns:
+        tuple: (train_file_path, test_file_path, log_file_path)
+    """
     # Setup logging
     logger, actual_log_path = setup_logging(log_file_path, logger_name="burgers_generation", mode="full_dataset")
     log_info, log_warning, log_error = get_logger_functions("burgers_generation")
     
     # Set random seeds for reproducibility
     set_random_seeds(seed)
-    
-    # Data generation parameters
-    num_train_trajectories = 100000  # Full 1e5 trajectories
-    num_test_trajectories = 50
-    num_time_points = 10
-    spatial_size = 128
-    viscosity = 0.01
-    sim_time = 1.0
-    time_step = 1e-4
     
     # Default file paths if not provided
     if train_file_path is None:
@@ -951,6 +1097,22 @@ if __name__ == "__main__":
     parser.add_argument("--log_file", type=str, default=None,
                        help="Path to save generation log (default: auto-generated)")
     
+    # Dataset generation parameters
+    parser.add_argument("--num_train_trajectories", type=int, default=100000,
+                       help="Number of training trajectories to generate (default: 100000)")
+    parser.add_argument("--num_test_trajectories", type=int, default=50,
+                       help="Number of test trajectories to generate (default: 50)")
+    parser.add_argument("--num_time_points", type=int, default=10,
+                       help="Number of time points in each trajectory (default: 10)")
+    parser.add_argument("--spatial_size", type=int, default=128,
+                       help="Number of spatial grid points (default: 128)")
+    parser.add_argument("--viscosity", type=float, default=0.01,
+                       help="Viscosity coefficient (default: 0.01)")
+    parser.add_argument("--sim_time", type=float, default=1.0,
+                       help="Total simulation time (default: 1.0)")
+    parser.add_argument("--time_step", type=float, default=1e-4,
+                       help="Time step for simulation (default: 1e-4)")
+    
     args = parser.parse_args()
     
     if args.mode == "test":
@@ -965,12 +1127,22 @@ if __name__ == "__main__":
         log_info(f"Test completed successfully. Log saved to: {actual_log_path}")
         
     elif args.mode == "small":
-        # Generate small dataset for testing
+        # Generate small dataset for testing - use smaller defaults if not specified
+        small_train = min(args.num_train_trajectories, 1000)  # Cap at 1000 for small dataset
+        small_test = min(args.num_test_trajectories, 50)      # Cap at 50 for small dataset
+        
         train_file, test_file, log_file = generate_small_dataset_for_testing(
             seed=args.seed,
             train_file_path=args.train_file,
             test_file_path=args.test_file,
-            log_file_path=args.log_file
+            log_file_path=args.log_file,
+            num_train_trajectories=small_train,
+            num_test_trajectories=small_test,
+            num_time_points=args.num_time_points,
+            spatial_size=args.spatial_size,
+            viscosity=args.viscosity,
+            sim_time=args.sim_time,
+            time_step=args.time_step
         )
         
         if args.validate:
@@ -1023,7 +1195,14 @@ if __name__ == "__main__":
             train_file_path=args.train_file,
             test_file_path=args.test_file,
             log_file_path=args.log_file,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            num_train_trajectories=args.num_train_trajectories,
+            num_test_trajectories=args.num_test_trajectories,
+            num_time_points=args.num_time_points,
+            spatial_size=args.spatial_size,
+            viscosity=args.viscosity,
+            sim_time=args.sim_time,
+            time_step=args.time_step
         )
         
     log_info("Done!")

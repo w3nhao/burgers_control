@@ -135,6 +135,16 @@ python -m burgers_control.burgers --mode small --validate
 # Generate full production dataset (100k training, 50 test trajectories)  
 python -m burgers_control.burgers --mode full --batch_size 8192
 
+# Generate custom dataset with specific parameters
+python -m burgers_control.burgers \
+    --mode full \
+    --num_train_trajectories 50000 \
+    --num_test_trajectories 25 \
+    --spatial_size 256 \
+    --viscosity 0.02 \
+    --sim_time 0.8 \
+    --seed 123
+
 # Test simulation consistency
 python -m burgers_control.burgers --mode test
 ```
@@ -203,6 +213,12 @@ The data generation creates two main outputs:
 
 ### Data Generation Parameters
 
+#### Dataset Size Parameters
+```bash
+--num_train_trajectories 100000  # Number of training trajectories (default: 100000)
+--num_test_trajectories 50       # Number of test trajectories (default: 50)
+```
+
 #### Physical Parameters
 ```bash
 --spatial_size 128          # Spatial grid points (default: 128)
@@ -221,6 +237,42 @@ The data generation creates two main outputs:
 --log_file path/to/log     # Custom log file path
 ```
 
+#### Custom Dataset Examples
+
+**Small Dataset for Development:**
+```bash
+python -m burgers_control.burgers \
+    --mode small \
+    --num_train_trajectories 100 \
+    --num_test_trajectories 10 \
+    --spatial_size 64 \
+    --sim_time 0.5 \
+    --seed 42
+```
+
+**Custom Physical Parameters:**
+```bash
+python -m burgers_control.burgers \
+    --mode full \
+    --num_train_trajectories 50000 \
+    --viscosity 0.02 \
+    --spatial_size 256 \
+    --num_time_points 20 \
+    --sim_time 2.0
+```
+
+**High-Resolution Dataset:**
+```bash
+python -m burgers_control.burgers \
+    --mode full \
+    --spatial_size 512 \
+    --num_time_points 50 \
+    --time_step 5e-5 \
+    --batch_size 1024  # Smaller batches for memory management
+```
+
+All parameters are stored in the dataset metadata for reproducibility and consistency checking.
+
 ### Data Storage Formats
 
 The package supports two storage formats:
@@ -235,7 +287,15 @@ dataset.set_format("torch")
 
 trajectories = dataset['trajectories']  # State evolution
 actions = dataset['actions']           # Forcing terms
+
+# Access simulation parameters stored in metadata
+print("Viscosity:", dataset[0]['viscosity'])
+print("Simulation time:", dataset[0]['sim_time'])
+print("Spatial size:", dataset[0]['spatial_size'])
+print("Time step:", dataset[0]['time_step'])
 ```
+
+**Metadata Storage**: All simulation parameters (viscosity, sim_time, time_step, spatial_size, num_time_points) are automatically stored with each trajectory for reproducibility and consistency validation.
 
 #### 2. HDF5 Format (Fallback)
 We are not going to use this format in the future.
@@ -260,8 +320,10 @@ u_data, f_data = generate_training_data(
     spatial_size=128,
     viscosity=0.01,
     sim_time=1.0,
+    time_step=1e-4,
     seed=42,
-    train_file_path="../data/custom_train"
+    train_file_path="../data/custom_train",
+    batch_size=500
 )
 ```
 
@@ -275,10 +337,32 @@ test_trajectories = generate_test_data(
     spatial_size=128,
     viscosity=0.01,
     sim_time=1.0,
+    time_step=1e-4,
     seed=42,
     test_file_path="../data/custom_test"
 )
 ```
+
+#### Generate Full Production Dataset
+```python
+from burgers_control.burgers import generate_full_dataset
+
+train_file, test_file, log_file = generate_full_dataset(
+    seed=42,
+    num_train_trajectories=100000,
+    num_test_trajectories=50,
+    num_time_points=10,
+    spatial_size=128,
+    viscosity=0.01,
+    sim_time=1.0,
+    time_step=1e-4,
+    batch_size=8192,
+    train_file_path="../data/production_train",
+    test_file_path="../data/production_test"
+)
+```
+
+All simulation parameters (viscosity, sim_time, time_step, spatial_size, etc.) are automatically stored in the dataset metadata, ensuring reproducibility and enabling consistency validation.
 
 #### Custom Initial Conditions and Forcing Terms
 ```python

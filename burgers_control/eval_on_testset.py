@@ -25,15 +25,17 @@ try:
 except ImportError:
     print("python-dotenv not available, relying on system environment variables")
 
-from .ppo import load_saved_agent
-from .burgers import (
+from burgers_control.ppo import load_saved_agent
+from burgers_control.burgers import (
     create_differential_matrices_1d, 
     simulate_burgers_one_time_point,
     get_test_data,
     get_squence_data,
+    get_test_data_with_metadata,
+    get_training_data_with_metadata,
     burgers_solver
 )
-from .utils.utils import setup_logging, get_logger_functions
+from burgers_control.utils.utils import setup_logging, get_logger_functions
 
 BURGERS_TEST_FILE_PATH = os.getenv("BURGERS_TEST_FILE_PATH")
 BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
@@ -73,37 +75,102 @@ def setup_simulation_matrices(spatial_size, viscosity, device):
     
     # Convert sparse matrices to tensor format
     transport_indices = list(first_deriv.rows)
-    transport_coeffs = torch.FloatTensor(np.stack(first_deriv.data) / (2 * spatial_step)).to(device)
+    transport_coeffs = torch.tensor(np.stack(first_deriv.data) / (2 * spatial_step), dtype=torch.float32, device=device)
     diffusion_indices = list(second_deriv.rows)
-    diffusion_coeffs = torch.FloatTensor(viscosity * np.stack(second_deriv.data) / spatial_step**2).to(device)
+    diffusion_coeffs = torch.tensor(float(viscosity) * np.stack(second_deriv.data) / spatial_step**2, dtype=torch.float32, device=device)
     
     return transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step
 
-def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10, 
-                         viscosity=0.01, sim_time=1.0, time_step=1e-4, mode="final_state"):
+def test_agent_on_dataset(agent, agent_metadata, device, num_trajectories=50, mode="final_state"):
     """
     Test agent on pre-generated test dataset using one-step simulation.
+    Environment parameters are extracted from agent metadata and validated against test dataset.
     
     Args:
         agent: Trained PPO agent
+        agent_metadata: Metadata from saved agent containing training parameters
         device: Device for computation
         num_trajectories: Number of test trajectories to evaluate
-        num_time_points: Number of time points in simulation
-        viscosity: Viscosity parameter
-        sim_time: Total simulation time
-        time_step: Time step for simulation
         mode: Target mode for goal-conditioned agent
             - "final_state": Use final target state as goal for all time steps (default)
             - "next_state": Use next state in sequence as target for each time step
         
     Returns:
-        float: Mean MSE over all test trajectories
+        tuple: (mean_mse, all_mse_values)
     """
     if mode not in ["final_state", "next_state"]:
         raise ValueError(f"Invalid mode '{mode}'. Must be 'final_state' or 'next_state'")
     
-    # Load test data
-    test_data = get_test_data(BURGERS_TEST_FILE_PATH)
+    # Extract environment parameters from agent metadata
+    nested_metadata = agent_metadata.get('metadata', {})
+    training_args = nested_metadata.get('args', {})
+    
+    agent_params = {
+        'num_time_points': training_args.get('num_time_points', 10),
+        'viscosity': training_args.get('viscosity', 0.01),
+        'sim_time': training_args.get('sim_time', 1.0),
+        'time_step': training_args.get('time_step', 1e-4),
+        'spatial_size': training_args.get('spatial_size', 128)
+    }
+    
+    log_info("="*50)
+    log_info("AGENT ENVIRONMENT PARAMETERS")
+    log_info("="*50)
+    for param, value in agent_params.items():
+        log_info(f"  {param}: {value}")
+    
+    # Load test data and extract its metadata
+    test_data, test_metadata = get_test_data_with_metadata(BURGERS_TEST_FILE_PATH)
+    
+    log_info("="*50)  
+    log_info("TEST DATASET PARAMETERS")
+    log_info("="*50)
+    for param, value in test_metadata.items():
+        log_info(f"  {param}: {value}")
+    
+    # Validate that agent and test dataset parameters match
+    log_info("="*50)
+    log_info("PARAMETER VALIDATION")
+    log_info("="*50)
+    
+    params_to_check = ['num_time_points', 'viscosity', 'sim_time', 'time_step', 'spatial_size']
+    mismatch_found = False
+    
+    for param in params_to_check:
+        agent_val = agent_params.get(param)
+        test_val = test_metadata.get(param)
+        
+        if agent_val is not None and test_val is not None:
+            if isinstance(agent_val, float) and isinstance(test_val, float):
+                # Use relative tolerance for floating point comparison
+                if abs(agent_val - test_val) > max(1e-9 * max(abs(agent_val), abs(test_val)), 1e-12):
+                    log_error(f"❌ MISMATCH: {param} - Agent: {agent_val}, Test dataset: {test_val}")
+                    mismatch_found = True
+                else:
+                    log_info(f"✓ MATCH: {param} - {agent_val}")
+            else:
+                if agent_val != test_val:
+                    log_error(f"❌ MISMATCH: {param} - Agent: {agent_val}, Test dataset: {test_val}")
+                    mismatch_found = True
+                else:
+                    log_info(f"✓ MATCH: {param} - {agent_val}")
+        else:
+            log_warning(f"⚠ MISSING: {param} - Agent: {agent_val}, Test dataset: {test_val}")
+    
+    if mismatch_found:
+        log_error("❌ CRITICAL: Parameter mismatch detected!")
+        log_error("The agent was trained with different environment parameters than the test dataset.")
+        log_error("Results may not be meaningful. Consider retraining or using correct datasets.")
+        raise ValueError("Environment parameter mismatch between agent and test dataset")
+    else:
+        log_info("✓ ALL PARAMETERS MATCH - proceeding with evaluation")
+    
+    # Use agent parameters for simulation
+    num_time_points = agent_params['num_time_points']
+    viscosity = agent_params['viscosity']
+    sim_time = agent_params['sim_time']
+    time_step = agent_params['time_step']
+    expected_spatial_size = agent_params['spatial_size']
     
     # Extract initial states and target states for the first num_trajectories
     initial_states = test_data['observations'][:num_trajectories, 0, :]  # Shape: (N, spatial_size)
@@ -114,12 +181,27 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
         full_observations = test_data['observations'][:num_trajectories]  # Shape: (N, T-1, spatial_size)
     
     spatial_size = initial_states.shape[1]
-    log_info(f"Testing on {num_trajectories} trajectories in '{mode}' mode")
+    
+    # Validate spatial size matches agent expectation
+    if spatial_size != expected_spatial_size:
+        log_error(f"❌ CRITICAL: Spatial size mismatch!")
+        log_error(f"Agent expects spatial_size={expected_spatial_size}, but test data has {spatial_size}")
+        raise ValueError(f"Spatial size mismatch: agent expects {expected_spatial_size}, got {spatial_size}")
+    
+    log_info("="*50)
+    log_info(f"TESTING AGENT ON DATASET - {mode.upper()} MODE")
+    log_info("="*50)
+    log_info(f"Testing on {num_trajectories} trajectories")
     log_info(f"Initial states shape: {initial_states.shape}")
     log_info(f"Final target states shape: {final_targets.shape}")
     if mode == "next_state":
         log_info(f"Full observations shape: {full_observations.shape}")
-    log_info(f"Spatial size: {spatial_size}")
+    log_info(f"Using simulation parameters from agent:")
+    log_info(f"  - Spatial size: {spatial_size}")
+    log_info(f"  - Num time points: {num_time_points}")
+    log_info(f"  - Viscosity: {viscosity}")
+    log_info(f"  - Sim time: {sim_time}")
+    log_info(f"  - Time step: {time_step}")
     
     # Setup simulation matrices
     transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step = \
@@ -219,25 +301,37 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     
     return mean_mse, all_mse_values
 
-def test_environment_with_training_data(device, num_trajectories=50, num_time_points=10,
-                                      viscosity=0.01, sim_time=1.0, time_step=1e-4):
+def test_environment_with_training_data(device, num_trajectories=50):
     """
     Test environment simulation using actions from training dataset.
+    Environment parameters are extracted from the dataset metadata.
     This serves as a sanity check for the environment implementation.
     
     Args:
         device: Device for computation  
         num_trajectories: Number of training trajectories to test
-        num_time_points: Number of time points in simulation
-        viscosity: Viscosity parameter
-        sim_time: Total simulation time  
-        time_step: Time step for simulation
         
     Returns:
-        float: Mean MSE between simulated final states and training final states
+        tuple: (mean_mse, all_mse_values)
     """
-    # Load training data
-    train_data = get_squence_data(BURGERS_TRAIN_FILE_PATH)
+    # Load training data with metadata
+    train_data, train_metadata = get_training_data_with_metadata(BURGERS_TRAIN_FILE_PATH)
+    
+    # Extract environment parameters from dataset metadata
+    num_time_points = train_metadata.get('num_time_points', 10)
+    viscosity = train_metadata.get('viscosity', 0.01)
+    sim_time = train_metadata.get('sim_time', 1.0)
+    time_step = train_metadata.get('time_step', 1e-4)
+    expected_spatial_size = train_metadata.get('spatial_size', 128)
+    
+    log_info("="*50)
+    log_info("TRAINING DATASET PARAMETERS")
+    log_info("="*50)
+    log_info(f"  - Num time points: {num_time_points}")
+    log_info(f"  - Viscosity: {viscosity}")
+    log_info(f"  - Simulation time: {sim_time}")
+    log_info(f"  - Time step: {time_step}")
+    log_info(f"  - Expected spatial size: {expected_spatial_size}")
     
     # Extract data for the first num_trajectories
     observations = train_data['observations'][:num_trajectories]  # Shape: (N, T-1, spatial_size)
@@ -248,14 +342,21 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
     initial_states = observations[:, 0, :]  # Shape: (N, spatial_size)
     
     spatial_size = initial_states.shape[1]
+    
+    # Validate spatial size
+    if spatial_size != expected_spatial_size:
+        log_warning(f"⚠ Spatial size mismatch: expected {expected_spatial_size}, got {spatial_size}")
+        log_warning("Using actual spatial size from data")
+    
+    log_info("="*50)
+    log_info("ENVIRONMENT CHECK SETUP")
+    log_info("="*50)
     log_info(f"Testing environment on {num_trajectories} training trajectories")
     log_info(f"Initial states shape: {initial_states.shape}")
     log_info(f"Actions shape: {actions.shape}")
     log_info(f"Target states shape: {targets.shape}")
     log_info(f"Spatial size: {spatial_size}")
-    
-    # Debug: Print simulation parameters
-    log_info("Simulation parameters:")
+    log_info("Using environment parameters from dataset metadata:")
     log_info(f"  - Viscosity: {viscosity}")
     log_info(f"  - Simulation time: {sim_time}")
     log_info(f"  - Time step: {time_step}")
@@ -266,7 +367,7 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
         setup_simulation_matrices(spatial_size, viscosity, device)
     
     # Calculate simulation parameters
-    total_steps = math.ceil(1 / time_step)
+    total_steps = math.ceil(sim_time / time_step)
     record_interval = math.floor(total_steps / num_time_points)
     
     log_info(f"  - Total simulation steps: {total_steps}")
@@ -488,14 +589,6 @@ def main():
                        help="Device to run on (cuda:0, cpu, or auto)")
     parser.add_argument("--num_trajectories", type=int, default=50,
                        help="Number of trajectories from test dataset to evaluate")
-    parser.add_argument("--num_time_points", type=int, default=10,
-                       help="Number of time points for simulation")
-    parser.add_argument("--viscosity", type=float, default=0.01,
-                       help="Viscosity parameter for simulation")
-    parser.add_argument("--sim_time", type=float, default=1.0,
-                       help="Total simulation time")
-    parser.add_argument("--time_step", type=float, default=1e-4,
-                       help="Time step for simulation")
     parser.add_argument("--mode", type=str, default="final_state",
                        choices=["final_state", "next_state"],
                        help="Target mode for goal-conditioned agent: 'final_state' (use final target for all steps) or 'next_state' (use next state as target)")
@@ -533,16 +626,16 @@ def main():
             log_info(f"Training spatial size: {training_args.get('spatial_size', 'unknown')}")
             log_info(f"Training viscosity: {training_args.get('viscosity', 'unknown')}")
             log_info(f"Training reward type: {training_args.get('reward_type', 'unknown')}")
+            log_info(f"Training num_time_points: {training_args.get('num_time_points', 'unknown')}")
+            log_info(f"Training sim_time: {training_args.get('sim_time', 'unknown')}")
+            log_info(f"Training time_step: {training_args.get('time_step', 'unknown')}")
         
         # Test the agent on the dataset
         mean_mse, all_mse_values = test_agent_on_dataset(
             agent=agent,
+            agent_metadata=metadata,
             device=device,
             num_trajectories=args.num_trajectories,
-            num_time_points=args.num_time_points,
-            viscosity=args.viscosity,
-            sim_time=args.sim_time,
-            time_step=args.time_step,
             mode=args.mode
         )
         
@@ -550,26 +643,26 @@ def main():
         log_info("SUMMARY")
         log_info("="*50)
         log_info(f"Tested agent on {args.num_trajectories} trajectories from test dataset")
+        log_info(f"Environment parameters were automatically extracted from agent metadata")
+        log_info(f"Test dataset parameters were validated against agent parameters")
         log_info(f"Final J_mean_mse: {mean_mse:.6f}")
         
     else:
         # Environment check mode - use training data with provided actions
         log_info("No checkpoint path provided. Running environment check mode.")
         log_info("This will test the environment simulation using training data actions.")
+        log_info("Environment parameters will be automatically extracted from dataset metadata.")
         
         mean_mse, all_mse_values = test_environment_with_training_data(
             device=device,
-            num_trajectories=args.num_trajectories,
-            num_time_points=args.num_time_points,
-            viscosity=args.viscosity,
-            sim_time=args.sim_time,
-            time_step=args.time_step
+            num_trajectories=args.num_trajectories
         )
         
         log_info("="*50)
         log_info("SUMMARY")
         log_info("="*50)
         log_info(f"Environment check completed on {args.num_trajectories} trajectories from training dataset")
+        log_info(f"Environment parameters were automatically extracted from dataset metadata")
         log_info(f"Final J_env_check_mse: {mean_mse:.10f}")
         log_info("Low MSE indicates accurate environment implementation.")
 
