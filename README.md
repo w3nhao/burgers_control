@@ -66,6 +66,8 @@ burgers-eval-env \
     --num_episodes 5
 ```
 
+It is highly recommended to tune the `learning_rate`, `ent_coef`, `num_minibatches` and `update_epochs` to get the best performance.
+
 ### 2. Using the Package API
 
 ```python
@@ -322,14 +324,6 @@ Training automatically logs to Weights & Biases:
 - KL divergence and entropy
 - Training speed (steps/second)
 
-## Performance Tips
-
-1. **Batch Size**: Use large `num_envs` (4096+) for stable training
-2. **Learning Rate**: Start with 1e-5, tune based on convergence
-3. **Pretraining**: Policy pretraining significantly improves sample efficiency
-4. **Hardware**: GPU with ≥8GB memory recommended for large batches
-5. **Compilation**: Enable `--compile` for faster training (PyTorch 2.0+)
-
 ## Troubleshooting
 
 ### Validation Test
@@ -359,10 +353,10 @@ If you use this package in your research, please cite:
 
 ```bibtex
 @software{burgers_control,
-  title={Burgers Control: RL for PDE Control},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/yourusername/burgers-control}
+  title={Burgers Control},
+  author={Wenhao Deng},
+  year={2025},
+  url={https://github.com/w3nhao/burgers-control}
 }
 ```
 
