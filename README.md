@@ -23,7 +23,7 @@ The system generates training data on-the-fly and trains policies to steer PDE s
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/w3nhao/burgers-control.git
 cd burgers_control
 
 # Install in development mode
@@ -37,10 +37,8 @@ This installs the package and provides console scripts for easy usage.
 The package automatically installs required dependencies including:
 - PyTorch (≥1.9.0)
 - Gymnasium
-- NumPy, SciPy
 - Weights & Biases
 - TensorDict
-- And more (see `requirements.txt`)
 
 ## Quick Start
 
@@ -335,17 +333,10 @@ Expected: MSE ≈ 0.0 (indicates perfect simulation consistency)
 
 ### Common Issues
 
-1. **CUDA out of memory**: Reduce `num_envs` or `spatial_size`
-2. **Slow training**: Enable compilation with `--compile`
-3. **NaN losses**: Reduce learning rate or check environment parameters
-4. **Package import errors**: Ensure installed with `pip install -e .`
-
-### Getting Help
-
-1. Run validation test first
-2. Check console script availability: `which burgers-train`
-3. Verify package installation: `python -c "import burgers_control; print('OK')"`
-4. Review logs in `logs/` directory
+1. **Slow training**: Enable compilation with `--compile`
+2. **Package import errors**: Ensure installed with `pip install -e .`
+3. **Verify package installation**: `python -c "import burgers_control; print('OK')"`
+4. **Review logs**: `logs/` directory
 
 ## Citation
 
