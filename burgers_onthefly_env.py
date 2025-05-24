@@ -319,7 +319,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             # - MSE = 9 → reward = 0.00012340980408667956
             # - MSE → ∞ → reward → 0
             mse_per_env = ((self.current_state - self.target_state)**2).mean(dim=1)  # Shape: [num_envs]
-            rewards = np.exp(-mse_per_env * self.mse_scaling_factor).cpu().numpy()  # Shape: [num_envs]
+            rewards = torch.exp(-mse_per_env * self.mse_scaling_factor).cpu().numpy()  # Shape: [num_envs]
         else:
             raise ValueError(f"Invalid reward type: {self.reward_type}")
         

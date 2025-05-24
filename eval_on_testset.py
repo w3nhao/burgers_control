@@ -5,21 +5,27 @@ Test script for evaluating trained PPO agents on pre-generated test dataset.
 This script loads a saved agent and tests it on 50 trajectories from the test dataset,
 using one-step simulation for environment evolution and calculating the final mean MSE.
 
+If no checkpoint path is provided, it performs an environment check using the first 50
+trajectories from the training dataset with their provided actions.
+
 Usage:
     python test_agent_on_dataset.py --checkpoint_path checkpoints/run_name/agent_final.pt
+    python test_agent_on_dataset.py  # Environment check mode
 """
 
 import argparse
 import torch
 import numpy as np
 import math
-import h5py
 from ppo import load_saved_agent
 from burgers import (
     create_differential_matrices_1d, 
     simulate_burgers_one_time_point,
     get_test_data,
-    BURGERS_TEST_FILE_PATH
+    get_squence_data,
+    BURGERS_TEST_FILE_PATH,
+    BURGERS_TRAIN_FILE_PATH,
+    burgers_solver
 )
 
 def setup_simulation_matrices(spatial_size, viscosity, device):
@@ -147,7 +153,8 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
         mse = ((final_state - target_state) ** 2).mean().item()
         all_mse_values.append(mse)
         
-        if (traj_idx + 1) % 10 == 0:
+        # Show progress - more frequent for small numbers of trajectories
+        if num_trajectories <= 10 or (traj_idx + 1) % 10 == 0:
             print(f"Completed trajectory {traj_idx + 1}/{num_trajectories}, MSE: {mse:.6f}")
     
     # Calculate overall statistics
@@ -166,9 +173,270 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     
     return mean_mse, all_mse_values
 
+def test_environment_with_training_data(device, num_trajectories=50, num_time_points=10,
+                                      viscosity=0.01, sim_time=0.1, time_step=1e-4):
+    """
+    Test environment simulation using actions from training dataset.
+    This serves as a sanity check for the environment implementation.
+    
+    Args:
+        device: Device for computation  
+        num_trajectories: Number of training trajectories to test
+        num_time_points: Number of time points in simulation
+        viscosity: Viscosity parameter
+        sim_time: Total simulation time  
+        time_step: Time step for simulation
+        
+    Returns:
+        float: Mean MSE between simulated final states and training final states
+    """
+    # Load training data
+    train_data = get_squence_data(BURGERS_TRAIN_FILE_PATH)
+    
+    # Extract data for the first num_trajectories
+    observations = train_data['observations'][:num_trajectories]  # Shape: (N, T-1, spatial_size)
+    actions = train_data['actions'][:num_trajectories]            # Shape: (N, T, spatial_size) 
+    targets = train_data['targets'][:num_trajectories]            # Shape: (N, spatial_size)
+    
+    # Get initial states (first observation for each trajectory)
+    initial_states = observations[:, 0, :]  # Shape: (N, spatial_size)
+    
+    spatial_size = initial_states.shape[1]
+    print(f"Testing environment on {num_trajectories} training trajectories")
+    print(f"Initial states shape: {initial_states.shape}")
+    print(f"Actions shape: {actions.shape}")
+    print(f"Target states shape: {targets.shape}")
+    print(f"Spatial size: {spatial_size}")
+    
+    # Debug: Print simulation parameters
+    print(f"\nSimulation parameters:")
+    print(f"  - Viscosity: {viscosity}")
+    print(f"  - Simulation time: {sim_time}")
+    print(f"  - Time step: {time_step}")
+    print(f"  - Number of time points: {num_time_points}")
+    
+    # Setup simulation matrices
+    transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step = \
+        setup_simulation_matrices(spatial_size, viscosity, device)
+    
+    # Calculate simulation parameters
+    total_steps = math.ceil(sim_time / time_step)
+    record_interval = math.floor(total_steps / num_time_points)
+    
+    print(f"  - Total simulation steps: {total_steps}")
+    print(f"  - Record interval: {record_interval}")
+    print(f"  - Actual steps per time point: {record_interval}")
+    print(f"  - Spatial step: {spatial_step:.6f}")
+    
+    # Convert to tensors and move to device
+    initial_states = torch.tensor(initial_states, device=device, dtype=torch.float32)
+    actions = torch.tensor(actions, device=device, dtype=torch.float32)
+    targets = torch.tensor(targets, device=device, dtype=torch.float32)
+    
+    all_final_states = []
+    all_mse_values = []
+    all_original_mse_values = []
+    
+    print(f"\n" + "="*50)
+    print("RUNNING ENVIRONMENT CHECK")
+    print("="*50)
+    
+    # Test first trajectory with detailed debugging
+    for traj_idx in range(min(1, num_trajectories)):  # Debug first trajectory only
+        print(f"\n--- Debugging trajectory {traj_idx} ---")
+        
+        # Get initial state and actions for this trajectory
+        current_state = initial_states[traj_idx:traj_idx+1]  # Shape: (1, spatial_size)
+        traj_actions = actions[traj_idx]                      # Shape: (T, spatial_size)
+        target_state = targets[traj_idx:traj_idx+1]          # Shape: (1, spatial_size)
+        
+        print(f"Initial state stats: mean={current_state.mean().item():.6f}, std={current_state.std().item():.6f}")
+        print(f"Target state stats: mean={target_state.mean().item():.6f}, std={target_state.std().item():.6f}")
+        
+        # COMPARISON 1: Use original burgers_solver
+        print(f"\n=== Testing original burgers_solver ===")
+        traj_actions_expanded = traj_actions.unsqueeze(0)  # Add batch dimension: (1, T, spatial_size)
+        original_trajectory = burgers_solver(current_state, traj_actions_expanded, num_time_points=num_time_points)
+        original_final_state = original_trajectory[:, -1, :]  # Shape: (1, spatial_size)
+        original_mse = ((original_final_state - target_state) ** 2).mean().item()
+        
+        print(f"Original solver final state stats: mean={original_final_state.mean().item():.6f}, std={original_final_state.std().item():.6f}")
+        print(f"Original solver MSE: {original_mse:.10f}")
+        
+        # COMPARISON 2: Use our step-by-step implementation
+        print(f"\n=== Testing step-by-step implementation ===")
+        
+        # Pad state for boundary conditions
+        state = torch.nn.functional.pad(current_state, (1, 1))  # Add boundary padding
+        
+        # Debug: Store intermediate states
+        intermediate_states = [current_state.clone()]
+        
+        # Run simulation for num_time_points using provided actions
+        for time_idx in range(num_time_points):
+            # Get action for this time step
+            action = traj_actions[time_idx:time_idx+1]  # Shape: (1, spatial_size)
+            
+            print(f"Time {time_idx}: action stats: mean={action.mean().item():.6f}, std={action.std().item():.6f}")
+            
+            # Pad action for simulation  
+            action_padded = torch.nn.functional.pad(action, (1, 1))
+            
+            # Run multiple time steps with this action
+            for step in range(record_interval):
+                state = simulate_burgers_one_time_point(
+                    state, action_padded, transport_indices, transport_coeffs,
+                    diffusion_indices, diffusion_coeffs, time_step
+                )
+            
+            # Store intermediate state (remove padding)
+            intermediate_state = state[..., 1:-1]
+            intermediate_states.append(intermediate_state.clone())
+            print(f"  After simulation: state stats: mean={intermediate_state.mean().item():.6f}, std={intermediate_state.std().item():.6f}")
+        
+        # Get final state (remove padding)
+        final_state = state[..., 1:-1]
+        
+        # Compare with target
+        mse = ((final_state - target_state) ** 2).mean().item()
+        max_abs_diff = (final_state - target_state).abs().max().item()
+        
+        print(f"\nFinal comparison:")
+        print(f"  - Step-by-step final state stats: mean={final_state.mean().item():.6f}, std={final_state.std().item():.6f}")
+        print(f"  - Step-by-step MSE: {mse:.10f}")
+        print(f"  - Max absolute difference from target: {max_abs_diff:.10f}")
+        
+        # Compare the two methods
+        method_diff = (final_state - original_final_state).abs().max().item()
+        print(f"  - Max difference between methods: {method_diff:.10f}")
+        
+        # Store for overall statistics
+        all_final_states.append(final_state)
+        all_mse_values.append(mse)
+        all_original_mse_values.append(original_mse)
+        
+        # Break after first trajectory for detailed debugging
+        break
+    
+    # Process remaining trajectories without detailed debugging
+    for traj_idx in range(1, num_trajectories):
+        # Get initial state and actions for this trajectory
+        current_state = initial_states[traj_idx:traj_idx+1]  # Shape: (1, spatial_size)
+        traj_actions = actions[traj_idx]                      # Shape: (T, spatial_size)
+        target_state = targets[traj_idx:traj_idx+1]          # Shape: (1, spatial_size)
+        
+        # Test with original burgers_solver
+        traj_actions_expanded = traj_actions.unsqueeze(0)  # Add batch dimension
+        original_trajectory = burgers_solver(current_state, traj_actions_expanded, num_time_points=num_time_points)
+        original_final_state = original_trajectory[:, -1, :]
+        original_mse = ((original_final_state - target_state) ** 2).mean().item()
+        all_original_mse_values.append(original_mse)
+        
+        # Test with step-by-step implementation
+        # Pad state for boundary conditions
+        state = torch.nn.functional.pad(current_state, (1, 1))  # Add boundary padding
+        
+        # Run simulation for num_time_points using provided actions
+        for time_idx in range(num_time_points):
+            # Get action for this time step
+            action = traj_actions[time_idx:time_idx+1]  # Shape: (1, spatial_size)
+            
+            # Pad action for simulation  
+            action_padded = torch.nn.functional.pad(action, (1, 1))
+            
+            # Run multiple time steps with this action
+            for step in range(record_interval):
+                state = simulate_burgers_one_time_point(
+                    state, action_padded, transport_indices, transport_coeffs,
+                    diffusion_indices, diffusion_coeffs, time_step
+                )
+        
+        # Get final state (remove padding)
+        final_state = state[..., 1:-1]
+        all_final_states.append(final_state)
+        
+        # Calculate MSE between simulated final state and training target
+        mse = ((final_state - target_state) ** 2).mean().item()
+        all_mse_values.append(mse)
+        
+        # Show progress - more frequent for small numbers of trajectories
+        if num_trajectories <= 10 or (traj_idx + 1) % 10 == 0:
+            print(f"Completed trajectory {traj_idx + 1}/{num_trajectories}, Step-by-step MSE: {mse:.10f}, Original MSE: {original_mse:.10f}")
+    
+    # Calculate overall statistics
+    mean_mse = np.mean(all_mse_values)
+    std_mse = np.std(all_mse_values)
+    min_mse = np.min(all_mse_values)
+    max_mse = np.max(all_mse_values)
+    
+    mean_original_mse = np.mean(all_original_mse_values)
+    std_original_mse = np.std(all_original_mse_values)
+    min_original_mse = np.min(all_original_mse_values)
+    max_original_mse = np.max(all_original_mse_values)
+    
+    print(f"\n" + "="*50)
+    print("ENVIRONMENT CHECK RESULTS")
+    print("="*50)
+    print(f"STEP-BY-STEP IMPLEMENTATION:")
+    print(f"  J_env_check_mse (Mean MSE over {num_trajectories} trajectories): {mean_mse:.10f}")
+    print(f"  Standard deviation: {std_mse:.10f}")
+    print(f"  Minimum MSE: {min_mse:.10f}")
+    print(f"  Maximum MSE: {max_mse:.10f}")
+    
+    print(f"\nORIGINAL BURGERS_SOLVER:")
+    print(f"  J_original_mse (Mean MSE over {num_trajectories} trajectories): {mean_original_mse:.10f}")
+    print(f"  Standard deviation: {std_original_mse:.10f}")
+    print(f"  Minimum MSE: {min_original_mse:.10f}")
+    print(f"  Maximum MSE: {max_original_mse:.10f}")
+    
+    if mean_original_mse < 1e-10:
+        print("\n✓ EXCELLENT: Original solver MSE is extremely low - training data is consistent!")
+    elif mean_original_mse < 1e-6:
+        print("\n✓ GOOD: Original solver MSE is very low - training data is mostly consistent.")
+    elif mean_original_mse < 1e-3:
+        print("\n⚠ WARNING: Original solver MSE is moderate - training data may have some inconsistencies.")
+    else:
+        print("\n❌ TRAINING DATA ISSUE: Original solver MSE is high - training data was generated with different parameters!")
+        print("   This indicates the training data targets don't match the current simulation parameters.")
+    
+    # Check if our implementation matches the original solver exactly
+    method_differences = [abs(step_mse - orig_mse) for step_mse, orig_mse in zip(all_mse_values, all_original_mse_values)]
+    max_method_diff = max(method_differences)
+    
+    if max_method_diff < 1e-10:
+        print("\n✓ EXCELLENT: Step-by-step implementation is PERFECT - matches original solver exactly!")
+        print("   Max difference between methods across all trajectories: {:.2e}".format(max_method_diff))
+    elif max_method_diff < 1e-6:
+        print("\n✓ GOOD: Step-by-step implementation is very accurate - closely matches original solver.")
+        print("   Max difference between methods: {:.2e}".format(max_method_diff))
+    else:
+        print("\n❌ IMPLEMENTATION ERROR: Step-by-step implementation differs from original solver.")
+        print("   Max difference between methods: {:.2e}".format(max_method_diff))
+    
+    print("\n" + "="*70)
+    print("DIAGNOSIS:")
+    if max_method_diff < 1e-10 and mean_original_mse > 1e-3:
+        print("✓ Environment implementation is CORRECT (perfectly matches reference solver)")
+        print("❌ Training data appears to be generated with different simulation parameters")
+        print("   - Both solvers give identical results")
+        print("   - Neither matches the training targets")
+        print("   - This suggests the training data was created with different:")
+        print("     * Viscosity coefficient")
+        print("     * Time step size") 
+        print("     * Simulation time")
+        print("     * Numerical scheme")
+    elif max_method_diff < 1e-10 and mean_original_mse < 1e-6:
+        print("✓ Environment implementation is CORRECT")
+        print("✓ Training data is consistent with current parameters")
+    else:
+        print("❌ Issues detected that need investigation")
+    print("="*70)
+    
+    return mean_mse, all_mse_values
+
 def main():
     parser = argparse.ArgumentParser(description="Test a saved PPO agent on pre-generated test dataset")
-    parser.add_argument("--checkpoint_path", type=str, required=True,
+    parser.add_argument("--checkpoint_path", type=str, required=False,
                        help="Path to the saved agent checkpoint")
     parser.add_argument("--device", type=str, default="auto", 
                        help="Device to run on (cuda:0, cpu, or auto)")
@@ -194,35 +462,57 @@ def main():
     print(f"Using device: {device}")
     
     # Load the saved agent
-    print(f"Loading agent from: {args.checkpoint_path}")
-    agent, metadata = load_saved_agent(args.checkpoint_path, device=device)
-    
-    # Print some info about the loaded agent
-    print("\n" + "="*50)
-    print("LOADED AGENT INFO")
-    print("="*50)
-    print(f"Training iteration: {metadata.get('iteration', 'unknown')}")
-    print(f"Global step: {metadata.get('global_step', 'unknown')}")
-    print(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
-    print(f"Version: {metadata.get('version', 'unknown')}")
-    print(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
-    
-    # Test the agent on the dataset
-    mean_mse, all_mse_values = test_agent_on_dataset(
-        agent=agent,
-        device=device,
-        num_trajectories=args.num_trajectories,
-        num_time_points=args.num_time_points,
-        viscosity=args.viscosity,
-        sim_time=args.sim_time,
-        time_step=args.time_step
-    )
-    
-    print(f"\n" + "="*50)
-    print("SUMMARY")
-    print("="*50)
-    print(f"Tested agent on {args.num_trajectories} trajectories from test dataset")
-    print(f"Final J_mean_mse: {mean_mse:.6f}")
+    if args.checkpoint_path:
+        print(f"Loading agent from: {args.checkpoint_path}")
+        agent, metadata = load_saved_agent(args.checkpoint_path, device=device)
+        
+        # Print some info about the loaded agent
+        print("\n" + "="*50)
+        print("LOADED AGENT INFO")
+        print("="*50)
+        print(f"Training iteration: {metadata.get('iteration', 'unknown')}")
+        print(f"Global step: {metadata.get('global_step', 'unknown')}")
+        print(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
+        print(f"Version: {metadata.get('version', 'unknown')}")
+        print(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
+        
+        # Test the agent on the dataset
+        mean_mse, all_mse_values = test_agent_on_dataset(
+            agent=agent,
+            device=device,
+            num_trajectories=args.num_trajectories,
+            num_time_points=args.num_time_points,
+            viscosity=args.viscosity,
+            sim_time=args.sim_time,
+            time_step=args.time_step
+        )
+        
+        print(f"\n" + "="*50)
+        print("SUMMARY")
+        print("="*50)
+        print(f"Tested agent on {args.num_trajectories} trajectories from test dataset")
+        print(f"Final J_mean_mse: {mean_mse:.6f}")
+        
+    else:
+        # Environment check mode - use training data with provided actions
+        print("No checkpoint path provided. Running environment check mode.")
+        print("This will test the environment simulation using training data actions.")
+        
+        mean_mse, all_mse_values = test_environment_with_training_data(
+            device=device,
+            num_trajectories=args.num_trajectories,
+            num_time_points=args.num_time_points,
+            viscosity=args.viscosity,
+            sim_time=args.sim_time,
+            time_step=args.time_step
+        )
+        
+        print(f"\n" + "="*50)
+        print("SUMMARY")
+        print("="*50)
+        print(f"Environment check completed on {args.num_trajectories} trajectories from training dataset")
+        print(f"Final J_env_check_mse: {mean_mse:.10f}")
+        print("Low MSE indicates accurate environment implementation.")
 
 if __name__ == "__main__":
     main() 

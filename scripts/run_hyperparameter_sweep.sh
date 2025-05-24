@@ -80,9 +80,9 @@ run_experiment 6 "large_network" \
     "Larger network capacity"
 
 # Configuration 8: Full optimization with target KL and no LR annealing
-run_experiment 7 "target_kl_no_anneal" \
-    "--num_minibatches 1024 --ent_coef 1e-3 --update_epochs 20 --gae_lambda 0.99 --clip_coef 0.1 --vf_coef 1.0 --hidden_dims 2048 2048 2048 1024 --target_kl 0.01 --no-anneal-lr" \
-    "Full optimization with target KL and constant LR"
+run_experiment 7 "target_kl" \
+    "--num_minibatches 1024 --ent_coef 1e-3 --update_epochs 20 --gae_lambda 0.99 --clip_coef 0.1 --vf_coef 1.0 --hidden_dims 2048 2048 2048 1024 --target_kl 0.01" \
+    "Full optimization with target KL"
 
 # Wait a moment for all to start
 sleep 5
