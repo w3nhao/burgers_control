@@ -26,6 +26,7 @@ from burgers_control.utils.utils import load_environment_variables
 load_environment_variables()
 
 from burgers_control.burgers_onthefly_env import BurgersOnTheFlyVecEnv
+from burgers_control.env_configs import create_env, get_env_config, list_env_configs
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
@@ -49,22 +50,6 @@ class Args:
     # Environment specific arguments
     env_id: str = "BurgersVec-v0"
     """the id of the environment"""
-    spatial_size: int = 128
-    """the spatial size of the environment"""
-    num_time_points: int = 10
-    """the number of time points of trajectory in the environment"""
-    viscosity: float = 0.01
-    """the viscosity of the Burgers' equation"""
-    sim_time: float = 1.0
-    """the total time of simulation"""
-    time_step: float = 1e-4
-    """the time step of simulation"""
-    forcing_terms_scaling_factor: float = 1.0
-    """the scaling factor of the forcing terms"""
-    reward_type: str = "exp_scaled_mse"
-    """the type of reward function to use"""
-    mse_scaling_factor: float = 1e3
-    """the scaling factor of the MSE reward"""
     
     # Model specific arguments
     hidden_dims: List[int] = field(default_factory=lambda: [1024, 1024, 1024])
@@ -403,23 +388,25 @@ if __name__ == "__main__":
         print(f"Save directory: {save_path}")
     
     ####### Environment setup #######
-    # Create vectorized environment
-    if args.env_id == "BurgersVec-v0":
-        env = BurgersOnTheFlyVecEnv(
-            num_envs=args.num_envs,
-            spatial_size=args.spatial_size,
-            num_time_points=args.num_time_points,
-            viscosity=args.viscosity,
-            sim_time=args.sim_time,
-            time_step=args.time_step,
-            forcing_terms_scaling_factor=args.forcing_terms_scaling_factor,
-            reward_type=args.reward_type,
-            mse_scaling_factor=args.mse_scaling_factor
-        )
+    # Create vectorized environment using registered configuration
+    try:
+        env = create_env(args.env_id, num_envs=args.num_envs)
         # Move environment to the same device as the neural network
         env.set_device(device)
-    else:
-        raise ValueError(f"Environment {args.env_id} not found")
+        print(f"Created environment {args.env_id} with configuration:")
+        config = get_env_config(args.env_id)
+        print(f"  - spatial_size: {config.spatial_size}")
+        print(f"  - num_time_points: {config.num_time_points}")
+        print(f"  - viscosity: {config.viscosity}")
+        print(f"  - sim_time: {config.sim_time}")
+        print(f"  - time_step: {config.time_step}")
+        print(f"  - reward_type: {config.reward_type}")
+    except ValueError as e:
+        print(f"Error creating environment: {e}")
+        print("Available environments:")
+        for env_name, env_config in list_env_configs().items():
+            print(f"  - {env_name}: {env_config}")
+        raise
     # Observation and action space dimensions
     n_obs = env.single_observation_space.shape[0]
     n_act = env.single_action_space.shape[0]

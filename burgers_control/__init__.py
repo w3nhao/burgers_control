@@ -13,6 +13,7 @@ from .burgers import *
 from .burgers_onthefly_env import *
 from .ppo import *
 from .layers import *
+from .env_configs import *
 
 # Import utility functions
 from .utils import *
@@ -23,4 +24,9 @@ __all__ = [
     "evaluate_on_testset",
     "evaluate_on_env",
     "pretrain_policy",
+    "EnvironmentConfig",
+    "register_env_config",
+    "get_env_config",
+    "list_env_configs",
+    "create_env",
 ] 

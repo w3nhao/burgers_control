@@ -47,8 +47,16 @@ After installation, you can use the package in three ways:
 ### 1. Using Console Scripts (Recommended)
 
 ```bash
-# Train PPO agent from scratch
+# Train PPO agent from scratch with V0 configuration (default)
 burgers-train \
+    --env_id BurgersVec-v0 \
+    --num_envs 8192 \
+    --total_timesteps 50000000 \
+    --learning_rate 1e-5
+
+# Train with V1 configuration (shorter simulation time)
+burgers-train \
+    --env_id BurgersVec-v1 \
     --num_envs 8192 \
     --total_timesteps 50000000 \
     --learning_rate 1e-5
@@ -83,10 +91,16 @@ It is highly recommended to tune the `learning_rate`, `ent_coef`, `num_minibatch
 
 ```python
 import burgers_control
-from burgers_control import BurgersOnTheFlyVecEnv, load_saved_agent
+from burgers_control import load_saved_agent
+from burgers_control.env_configs import create_env
 
-# Create environment
-env = BurgersOnTheFlyVecEnv(num_envs=1024, spatial_size=128)
+# Create environment using configuration system
+env = create_env('BurgersVec-v0', num_envs=1024)  # Original settings
+env_fast = create_env('BurgersVec-v1', num_envs=1024)  # Shorter simulation
+
+# Or create environment directly (legacy method)
+from burgers_control import BurgersOnTheFlyVecEnv
+env_legacy = BurgersOnTheFlyVecEnv(num_envs=1024, spatial_size=128)
 
 # Load trained agent
 agent, metadata = load_saved_agent("path/to/checkpoint.pt")
@@ -95,8 +109,11 @@ agent, metadata = load_saved_agent("path/to/checkpoint.pt")
 ### 3. Running Module Scripts
 
 ```bash
-# Train PPO agent
-python -m burgers_control.ppo --num_envs 8192
+# Train PPO agent with default V0 configuration
+python -m burgers_control.ppo --env_id BurgersVec-v0 --num_envs 8192
+
+# Train PPO agent with V1 configuration (faster simulation)
+python -m burgers_control.ppo --env_id BurgersVec-v1 --num_envs 8192
 
 # Evaluate on test dataset (requires explicit --test_file_path)
 python -m burgers_control.eval_on_testset \
@@ -611,12 +628,152 @@ burgers-eval-env \
 
 ## Configuration Options
 
-### Environment Parameters
-- `spatial_size`: Spatial grid points (default: 128)
-- `num_time_points`: Time steps per episode (default: 10)
-- `viscosity`: PDE viscosity coefficient (default: 0.01)
-- `sim_time`: Physical simulation time (default: 1.0)
-- `reward_type`: Reward function ("vanilla", "inverse_mse", "exp_scaled_mse")
+### Environment Configuration System
+
+The package now uses a centralized environment configuration system defined in `burgers_control/env_configs.py`. Instead of specifying individual environment parameters, you select from pre-registered environment configurations:
+
+#### Available Environment Configurations
+
+- **`BurgersVec-v0`** (Original settings):
+  - `spatial_size`: 128
+  - `num_time_points`: 10
+  - `viscosity`: 0.01
+  - `sim_time`: 1.0
+  - `time_step`: 1e-4
+  - `forcing_terms_scaling_factor`: 1.0
+  - `reward_type`: "exp_scaled_mse"
+  - `mse_scaling_factor`: 1e3
+
+- **`BurgersVec-v1`** (Shorter simulation time):
+  - Same as V0, but with `sim_time`: 0.1 (10x faster simulation)
+
+#### Creating Custom Environment Configurations
+
+You can easily add your own environment configurations by editing `burgers_control/env_configs.py`. Here's how:
+
+1. **Define a new configuration**:
+```python
+# Add to burgers_control/env_configs.py
+register_env_config(
+    "BurgersVec-v2",  # Your custom environment ID
+    EnvironmentConfig(
+        spatial_size=256,           # Higher resolution
+        num_time_points=20,         # More time steps
+        viscosity=0.005,           # Lower viscosity
+        sim_time=2.0,              # Longer simulation
+        time_step=5e-5,            # Smaller time step
+        forcing_terms_scaling_factor=2.0,  # Stronger forcing
+        reward_type="inverse_mse",  # Different reward function
+        mse_scaling_factor=5e3,    # Different scaling
+    )
+)
+```
+
+2. **Register configurations for different scenarios**:
+```python
+# High-resolution configuration
+register_env_config(
+    "BurgersVec-HighRes",
+    EnvironmentConfig(
+        spatial_size=512,
+        num_time_points=10,
+        viscosity=0.01,
+        sim_time=1.0,
+        time_step=1e-4,
+        forcing_terms_scaling_factor=1.0,
+        reward_type="exp_scaled_mse",
+        mse_scaling_factor=1e3,
+    )
+)
+
+# Low-viscosity configuration (more turbulent)
+register_env_config(
+    "BurgersVec-Turbulent",
+    EnvironmentConfig(
+        spatial_size=128,
+        num_time_points=15,
+        viscosity=0.001,  # Much lower viscosity
+        sim_time=0.5,
+        time_step=1e-5,   # Smaller time step for stability
+        forcing_terms_scaling_factor=0.5,
+        reward_type="exp_scaled_mse",
+        mse_scaling_factor=2e3,
+    )
+)
+
+# Fast prototyping configuration
+register_env_config(
+    "BurgersVec-Fast",
+    EnvironmentConfig(
+        spatial_size=64,   # Lower resolution
+        num_time_points=5, # Fewer steps
+        viscosity=0.02,    # Higher viscosity for stability
+        sim_time=0.1,      # Short simulation
+        time_step=2e-4,    # Larger time step
+        forcing_terms_scaling_factor=1.0,
+        reward_type="inverse_mse",  # Simpler reward
+        mse_scaling_factor=1e3,
+    )
+)
+```
+
+3. **Use your custom configurations**:
+```bash
+# Train with your custom high-resolution environment
+burgers-train --env_id BurgersVec-HighRes --num_envs 4096
+
+# Train with turbulent dynamics
+burgers-train --env_id BurgersVec-Turbulent --num_envs 8192
+
+# Quick prototyping with fast environment
+burgers-train --env_id BurgersVec-Fast --num_envs 16384
+```
+
+#### Best Practices for Custom Configurations
+
+**When to create custom configurations:**
+- **Research experiments**: Different physical parameters (viscosity, simulation time)
+- **Performance tuning**: Different spatial/temporal resolutions for speed vs. accuracy trade-offs
+- **Specialized scenarios**: Different reward functions or scaling factors
+- **Hardware constraints**: Smaller configurations for limited memory/compute
+
+**Configuration naming conventions:**
+- Use descriptive names: `BurgersVec-HighRes`, `BurgersVec-Turbulent`, `BurgersVec-Fast`
+- Include version numbers for experiments: `BurgersVec-Exp1`, `BurgersVec-Exp2`
+- Indicate key characteristics: `BurgersVec-LowVisc`, `BurgersVec-LongSim`
+
+**Parameter considerations:**
+- **Stability**: Lower viscosity requires smaller time steps (`time_step`)
+- **Performance**: Higher resolution (`spatial_size`) needs more compute and memory
+- **Training speed**: Shorter `sim_time` and fewer `num_time_points` for faster episodes
+- **Reward tuning**: Different `reward_type` and `mse_scaling_factor` for learning dynamics
+
+#### Usage
+
+```bash
+# Train with original settings (V0)
+burgers-train --env_id BurgersVec-v0
+
+# Train with shorter simulation time (V1)
+burgers-train --env_id BurgersVec-v1
+```
+
+```python
+# Programmatic usage
+from burgers_control.env_configs import create_env, get_env_config, list_env_configs
+
+# Create environments
+env_v0 = create_env('BurgersVec-v0', num_envs=1024)
+env_v1 = create_env('BurgersVec-v1', num_envs=1024)
+
+# List all available configurations
+configs = list_env_configs()
+print(configs)
+
+# Get specific configuration details
+config = get_env_config('BurgersVec-v1')
+print(f"V1 sim_time: {config.sim_time}")  # 0.1
+```
 
 ### Evaluation Parameters
 - `mode`: Goal-conditioned evaluation mode ("final_state", "next_state")
@@ -643,6 +800,7 @@ burgers_control/
 ├── __init__.py                 # Package initialization
 ├── burgers.py                  # PDE simulation and datasets  
 ├── burgers_onthefly_env.py     # Gymnasium environment
+├── env_configs.py              # Environment configuration registry
 ├── ppo.py                      # PPO training script
 ├── pretrain_policy.py          # Policy pretraining
 ├── eval_on_testset.py          # Test dataset evaluation
@@ -708,10 +866,25 @@ This change ensures explicit data dependencies and makes scripts more portable a
 
 ```python
 import torch
-from burgers_control import BurgersOnTheFlyVecEnv, load_saved_agent
+from burgers_control import load_saved_agent
+from burgers_control.env_configs import create_env, get_env_config
 
-# Create custom environment
-env = BurgersOnTheFlyVecEnv(
+# Create environment using configuration system (recommended)
+env = create_env('BurgersVec-v0', num_envs=512)  # Original settings
+env_fast = create_env('BurgersVec-v1', num_envs=512)  # Shorter simulation
+
+# Create custom environment with overrides
+env_custom = create_env('BurgersVec-v0', num_envs=512, 
+                       reward_type="inverse_mse", 
+                       mse_scaling_factor=2e3)
+
+# Use custom registered configurations (if you added them to env_configs.py)
+env_highres = create_env('BurgersVec-HighRes', num_envs=256)  # Fewer envs for high-res
+env_turbulent = create_env('BurgersVec-Turbulent', num_envs=1024)
+
+# Or create environment directly (legacy method)
+from burgers_control import BurgersOnTheFlyVecEnv
+env_legacy = BurgersOnTheFlyVecEnv(
     num_envs=512,
     spatial_size=64,
     reward_type="exp_scaled_mse",
@@ -731,23 +904,63 @@ with torch.no_grad():
     action = agent.actor_mean(obs)
 ```
 
+### Working with Custom Configurations Programmatically
+
+```python
+from burgers_control.env_configs import (
+    register_env_config, EnvironmentConfig, 
+    get_env_config, list_env_configs, create_env
+)
+
+# Register a new configuration at runtime
+register_env_config(
+    "BurgersVec-Custom",
+    EnvironmentConfig(
+        spatial_size=256,
+        num_time_points=15,
+        viscosity=0.005,
+        sim_time=1.5,
+        time_step=7.5e-5,
+        forcing_terms_scaling_factor=1.5,
+        reward_type="vanilla",
+        mse_scaling_factor=2e3,
+    )
+)
+
+# List all available configurations
+configs = list_env_configs()
+print("Available environments:")
+for env_id in configs.keys():
+    config = get_env_config(env_id)
+    print(f"  {env_id}: spatial_size={config.spatial_size}, sim_time={config.sim_time}")
+
+# Create environment with your custom configuration
+env = create_env('BurgersVec-Custom', num_envs=1024)
+
+# Override specific parameters while keeping the base configuration
+env_modified = create_env('BurgersVec-Custom', num_envs=512, 
+                         spatial_size=128,  # Override to smaller size
+                         viscosity=0.01)    # Override to higher viscosity
+```
+
 ### Custom Training Loop
 
 ```python
 from burgers_control.ppo import Agent, Args
-from burgers_control.burgers_onthefly_env import BurgersOnTheFlyVecEnv
+from burgers_control.env_configs import create_env
 
 # Custom configuration
 args = Args(
+    env_id='BurgersVec-v1',  # Use V1 for faster training
     num_envs=2048,
     learning_rate=5e-6,
     total_timesteps=1000000
 )
 
-# Create environment and agent
-env = BurgersOnTheFlyVecEnv(num_envs=args.num_envs)
-agent = Agent(n_obs=env.observation_space.shape[0], 
-              n_act=env.action_space.shape[0])
+# Create environment using configuration system
+env = create_env(args.env_id, num_envs=args.num_envs)
+agent = Agent(n_obs=env.single_observation_space.shape[0], 
+              n_act=env.single_action_space.shape[0])
 
 # ... implement training loop
 ```
