@@ -364,15 +364,25 @@ def simulate_burgers_equation(initial_conditions, forcing_terms, viscosity, sim_
     spatial_step = (domain_max - domain_min) / (spatial_size + 1)
 
     # Number of steps to final time
-    total_steps = math.ceil(sim_time / time_step)
+    total_steps_raw = math.ceil(sim_time / time_step)
+
+    # Calculate record interval using integer division to ensure exact alignment
+    record_interval = total_steps_raw // num_time_steps
+
+    # Adjust total steps to be exactly divisible by num_time_steps
+    # This ensures each forcing term is applied for exactly the same duration
+    total_steps = record_interval * num_time_steps
+
+    # Log the adjustment if there's a discrepancy
+    if total_steps != total_steps_raw:
+        actual_sim_time = total_steps * time_step
+        log_info(f"Adjusted simulation: requested {total_steps_raw} steps ({sim_time:.6f}s), "
+                 f"using {total_steps} steps ({actual_sim_time:.6f}s) for exact temporal alignment")
 
     state = initial_conditions.reshape(num_samples, spatial_size)
     state = F.pad(state, (1, 1))  # Add boundary padding
     forcing_terms = forcing_terms.reshape(num_samples, num_time_steps, spatial_size)
     forcing_terms = F.pad(forcing_terms, (1, 1))  # Add boundary padding
-    
-    # Record solution every this number of steps
-    record_interval = math.floor(total_steps / num_time_steps)
     
     first_deriv, second_deriv = create_differential_matrices_1d(spatial_size + 2)
     
@@ -412,10 +422,13 @@ def simulate_burgers_equation(initial_conditions, forcing_terms, viscosity, sim_
         transport_term = torch.einsum('nsi,si->ns', squared_state[..., transport_indices], transport_coeffs)
         diffusion_term = torch.einsum('nsi,si->ns', state[..., diffusion_indices], diffusion_coeffs)
         
-        # Update forcing index
+        # Update forcing index - now guaranteed to be in valid range
         if step % record_interval == 0:
             forcing_index += 1
-            
+        
+        # Assert that forcing index is always valid (safety check)
+        assert 0 <= forcing_index < num_time_steps, f"Invalid forcing_index {forcing_index}, should be in [0, {num_time_steps-1}]"
+        
         # Update state using Euler step
         state = state + time_step * (
             -(1/2) * transport_term + 
@@ -1091,6 +1104,129 @@ def test_one_time_point_simulation(seed=42):
     
     return full_simulation, step_by_step_simulation
 
+def test_temporal_discretization_fix(seed=42):
+    """
+    Comprehensive test to verify that the temporal discretization fix works correctly.
+    Tests various parameter combinations that would have triggered the original bug.
+    """
+    # Set random seed for reproducibility
+    if seed is not None:
+        np.random.seed(seed)
+        
+    log_info("Running temporal discretization fix test...")
+    
+    # Test cases with different parameter combinations
+    test_cases = [
+        # (sim_time, time_step, num_time_points, description)
+        (1.0, 1e-4, 10, "Standard case"),
+        (1.0, 1.1e-4, 10, "Non-divisible time step"),
+        (0.5, 7.3e-5, 8, "Fractional sim time, odd time step"),
+        (2.0, 1.3e-4, 15, "Longer simulation, larger time step"),
+        (1.0, 9.9e-5, 12, "Edge case with near-round numbers"),
+    ]
+    
+    for sim_time, time_step, num_time_points, description in test_cases:
+        log_info(f"\nTesting: {description}")
+        log_info(f"  Parameters: sim_time={sim_time}, time_step={time_step}, num_time_points={num_time_points}")
+        
+        # Parameters for test
+        num_samples = 2
+        spatial_size = 32  # Smaller for faster testing
+        viscosity = 0.01
+        
+        # Generate test data
+        initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
+            num_samples, num_samples, spatial_size, num_time_points, 
+            scaling_factor=0.1, max_time=sim_time, seed=seed
+        )
+        
+        # Calculate expected parameters
+        total_steps_raw = math.ceil(sim_time / time_step)
+        record_interval = total_steps_raw // num_time_points
+        total_steps_adjusted = record_interval * num_time_points
+        actual_sim_time = total_steps_adjusted * time_step
+        
+        log_info(f"  Raw total steps: {total_steps_raw}")
+        log_info(f"  Record interval: {record_interval}")
+        log_info(f"  Adjusted total steps: {total_steps_adjusted}")
+        log_info(f"  Actual sim time: {actual_sim_time:.6f}s")
+        
+        # Test the simulation
+        try:
+            trajectory = simulate_burgers_equation(
+                initial_conditions, forcing_terms, viscosity, sim_time,
+                time_step=time_step, num_time_points=num_time_points,
+                print_progress=False
+            )
+            
+            # Verify output shape
+            expected_shape = (num_samples, num_time_points + 1, spatial_size)
+            assert trajectory.shape == expected_shape, f"Expected shape {expected_shape}, got {trajectory.shape}"
+            
+            # Verify that the simulation completed without assertion errors
+            log_info(f"  ✓ Test passed: simulation completed successfully")
+            log_info(f"  ✓ Output shape correct: {trajectory.shape}")
+            
+        except Exception as e:
+            log_error(f"  ❌ Test failed: {str(e)}")
+            raise
+    
+    # Test forcing index tracking manually for one case
+    log_info("\nTesting forcing index tracking manually...")
+    
+    sim_time = 1.0
+    time_step = 1.1e-4  # This would have caused the original bug
+    num_time_points = 10
+    
+    total_steps_raw = math.ceil(sim_time / time_step)  # 9091
+    record_interval = total_steps_raw // num_time_points  # 909
+    total_steps_adjusted = record_interval * num_time_points  # 9090
+    
+    log_info(f"Manual test parameters:")
+    log_info(f"  Raw steps: {total_steps_raw}, Adjusted steps: {total_steps_adjusted}")
+    log_info(f"  Record interval: {record_interval}")
+    
+    # Simulate the forcing index updates
+    forcing_index = -1
+    forcing_indices_used = []
+    
+    for step in range(total_steps_adjusted):
+        if step % record_interval == 0:
+            forcing_index += 1
+        forcing_indices_used.append(forcing_index)
+    
+    max_forcing_index = max(forcing_indices_used)
+    num_unique_indices = len(set(forcing_indices_used))
+    
+    log_info(f"  Forcing indices range: 0 to {max_forcing_index}")
+    log_info(f"  Number of unique indices: {num_unique_indices}")
+    log_info(f"  Expected max index: {num_time_points - 1}")
+    
+    # Verify that forcing index never exceeds valid range
+    assert max_forcing_index < num_time_points, f"Max forcing index {max_forcing_index} >= {num_time_points}"
+    assert num_unique_indices == num_time_points, f"Expected {num_time_points} unique indices, got {num_unique_indices}"
+    
+    # Verify that each forcing index is used for exactly record_interval steps
+    from collections import Counter
+    index_counts = Counter(forcing_indices_used)
+    
+    for idx in range(num_time_points):
+        count = index_counts[idx]
+        assert count == record_interval, f"Forcing index {idx} used {count} times, expected {record_interval}"
+    
+    log_info(f"  ✓ All forcing indices used for exactly {record_interval} steps")
+    log_info(f"  ✓ Manual forcing index test passed")
+    
+    log_info("\n" + "="*50)
+    log_info("ALL TEMPORAL DISCRETIZATION TESTS PASSED!")
+    log_info("The fix ensures:")
+    log_info("1. Forcing indices never exceed valid range")
+    log_info("2. Each forcing term is applied for equal duration")
+    log_info("3. Simulation completes without errors")
+    log_info("4. Output shapes are correct")
+    log_info("="*50)
+    
+    return True
 
 # ===============================
 # Random seed utils
@@ -1121,8 +1257,8 @@ def set_random_seeds(seed=42):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Burgers equation simulation and data generation")
-    parser.add_argument("--mode", type=str, default="test", choices=["test", "small", "full"],
-                       help="Mode: 'test' runs simulation test, 'small' generates small dataset, 'full' generates full dataset")
+    parser.add_argument("--mode", type=str, default="test", choices=["test", "small", "full", "test_temporal"],
+                       help="Mode: 'test' runs simulation test, 'small' generates small dataset, 'full' generates full dataset, 'test_temporal' runs temporal discretization tests")
     parser.add_argument("--validate", action="store_true", 
                        help="Run environment validation after generating small dataset")
     parser.add_argument("--seed", type=int, default=42,
@@ -1163,6 +1299,18 @@ if __name__ == "__main__":
         set_random_seeds(args.seed)
         test_one_time_point_simulation(args.seed)
         log_info(f"Test completed successfully. Log saved to: {actual_log_path}")
+        
+    elif args.mode == "test_temporal":
+        # Run the new temporal discretization tests
+        logger, actual_log_path = setup_logging(logger_name="burgers_generation", mode="temporal_test")
+        
+        log_info("Running temporal discretization fix tests...")
+        set_random_seeds(args.seed)
+        
+        # Run comprehensive test
+        test_temporal_discretization_fix(args.seed)
+        
+        log_info(f"All temporal tests completed successfully. Log saved to: {actual_log_path}")
         
     elif args.mode == "small":
         # Generate small dataset for testing - use smaller defaults if not specified
