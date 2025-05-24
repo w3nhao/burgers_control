@@ -9,6 +9,10 @@ from functools import partial
 import os
 from datasets import Dataset, load_from_disk
 import argparse
+import random
+import logging
+import sys
+from datetime import datetime
 
 try:
     import h5py
@@ -19,6 +23,115 @@ except ImportError:
 
 BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
 BURGERS_TEST_FILE_PATH = os.getenv("BURGERS_TEST_FILE_PATH")
+
+# ===============================
+# Dataset loading utils
+# ===============================
+
+def discounted_cumsum(x: torch.Tensor, gamma: float) -> torch.Tensor:
+    """
+    Calculate the discounted cumulative sum of x (can be rewards or costs).
+    """
+    cumsum = torch.zeros_like(x)
+    cumsum[-1] = x[-1]
+    for t in reversed(range(x.shape[0] - 1)):
+        cumsum[t] = x[t] + gamma * cumsum[t + 1]
+    return cumsum
+
+def get_squence_data(file_path=BURGERS_TRAIN_FILE_PATH):
+    # Load dataset using Hugging Face datasets
+    try:
+        dataset = load_from_disk(file_path)
+        dataset.set_format("torch")
+        
+        # Extract data from the dataset
+        u_data = dataset['trajectories'][:40000]  # Limit to 40k as before
+        f_data = dataset['actions'][:40000]
+        
+    except Exception as e:
+        print(f"Warning: Could not load dataset from {file_path}. Error: {e}")
+        print("Falling back to HDF5 format...")
+        # Fallback to HDF5 if datasets format doesn't exist
+        with h5py.File(file_path + ".h5", 'r') as hdf:
+            print("Keys: ", list(hdf.keys()))
+            u_data = torch.tensor(hdf['train']['pde_11-128'][:40000])
+            f_data = torch.tensor(hdf['train']['pde_11-128_f'][:40000])
+        
+    # [s_0, s_1, s_2, ..., s_n - 1]
+    # [a_0, a_1, a_2, ..., a_n - 1]
+    # [r_1, r_2, r_3, ..., r_n]
+    # [c_1, c_2, c_3, ..., c_n]
+        
+    rewards = -(u_data[:, -1].unsqueeze(1) - u_data[:, 1:]).square().mean(-1)
+    
+    terminals = np.zeros(rewards.shape, dtype=np.bool_)
+    terminals[:, -1] = True
+
+    data = dict(
+        observations=u_data[:, :-1].numpy(),
+        actions=f_data.numpy(),
+        rewards=rewards.numpy(),
+        targets=u_data[:, -1].numpy(),
+    )
+    return data
+
+def get_test_data(file_path=BURGERS_TEST_FILE_PATH):
+    # Load dataset using Hugging Face datasets
+    try:
+        dataset = load_from_disk(file_path)
+        dataset.set_format("torch")
+        
+        # Extract data from the dataset
+        u_test = dataset['trajectories']
+        
+    except Exception as e:
+        print(f"Warning: Could not load dataset from {file_path}. Error: {e}")
+        print("Falling back to HDF5 format...")
+        # Fallback to HDF5 if datasets format doesn't exist
+        with h5py.File(file_path + ".h5", 'r') as hdf:
+            u_test = torch.tensor(hdf['test'][:])
+    
+    rewards = -((u_test[:, -1][:, None, :] - u_test[:, 1:]) ** 2).mean(-1)
+    observations = u_test[:, :-1]
+    targets = u_test[:, -1]
+        
+    data = dict(
+        observations=observations.numpy(),
+        actions=[None] * len(observations),
+        rewards=rewards.numpy(),
+        targets=targets.numpy(),
+    )
+    return data
+
+class BurgersDataset(torch.utils.data.Dataset):
+    def __init__(self, mode: str):
+        assert mode in ["train", "test"]
+        if mode == "train":
+            self.data = get_squence_data(BURGERS_TRAIN_FILE_PATH)
+        elif mode == "test":
+            self.data = get_test_data(BURGERS_TEST_FILE_PATH)
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+        
+    def __len__(self):
+        return len(self.data['observations'])
+    
+    def __getitem__(self, idx):
+        observations = self.data['observations'][idx]
+        actions = self.data['actions'][idx]
+        rewards = self.data['rewards'][idx]
+        targets = self.data['targets'][idx]
+        
+        return dict(
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            targets=targets,
+        )
+
+# ===============================
+# Simulation utils
+# ===============================
 
 def create_differential_matrices_1d(grid_size):
     """
@@ -192,7 +305,7 @@ def simulate_burgers_one_time_point(state, forcing_term, transport_indices, tran
 
 def make_initial_conditions_and_varying_forcing_terms(num_initial_conditions, num_forcing_terms, spatial_size, 
                                            num_time_points, amplitude_compensation=2, 
-                                           partial_control=None, scaling_factor=1.0, max_time=1.0):
+                                           partial_control=None, scaling_factor=1.0, max_time=1.0, seed=None):
     """
     Generates initial conditions and time-varying forcing terms for Burgers' equation.
     
@@ -205,12 +318,17 @@ def make_initial_conditions_and_varying_forcing_terms(num_initial_conditions, nu
         partial_control (str): Partial control mode (None or 'front_rear_quarter')
         scaling_factor (float): Scaling factor for forcing terms
         max_time (float): Maximum simulation time
+        seed (int): Random seed for reproducibility (optional)
         
     Returns:
         tuple: (initial_conditions, forcing_terms)
             - initial_conditions: tensor of shape (num_initial_conditions, spatial_size)
             - forcing_terms: tensor of shape (num_forcing_terms, num_time_points, spatial_size)
     """
+    # Set random seed if provided
+    if seed is not None:
+        np.random.seed(seed)
+        
     # Define spatial domain
     domain_min = 0.0
     domain_max = 1.0
@@ -289,9 +407,13 @@ def make_initial_conditions_and_varying_forcing_terms(num_initial_conditions, nu
     
     return torch.tensor(initial_conditions, dtype=torch.float32), forcing_terms
 
+# ===============================
+# Data generation utils
+# ===============================
 
 def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_size=128,
-                          viscosity=0.01, sim_time=0.1, time_step=1e-4):
+                          viscosity=0.01, sim_time=0.1, time_step=1e-4, seed=None, 
+                          train_file_path=None):
     """
     Generate training data with initial conditions, intermediate states, and actions.
     
@@ -302,15 +424,21 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
         viscosity: Viscosity parameter
         sim_time: Total simulation time
         time_step: Time step for simulation
+        seed: Random seed for reproducibility
+        train_file_path: Path to save the training data
         
     Returns:
         tuple: (u_data, f_data) where
             - u_data: State trajectories (N, T+1, spatial_size)
             - f_data: Forcing terms (N, T, spatial_size)
     """
-    print(f"Generating {num_trajectories} training trajectories...")
-    print(f"Parameters: viscosity={viscosity}, sim_time={sim_time}, time_step={time_step}")
-    print(f"Spatial size: {spatial_size}, Time points: {num_time_points}")
+    log_info(f"Generating {num_trajectories} training trajectories...")
+    log_info(f"Parameters: viscosity={viscosity}, sim_time={sim_time}, time_step={time_step}")
+    log_info(f"Spatial size: {spatial_size}, Time points: {num_time_points}")
+    if seed is not None:
+        log_info(f"Random seed: {seed}")
+    if train_file_path is not None:
+        log_info(f"Will save training data to: {train_file_path}")
     
     # Generate initial conditions and forcing terms
     initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
@@ -319,11 +447,12 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
         spatial_size=spatial_size,
         num_time_points=num_time_points,
         scaling_factor=1.0,
-        max_time=sim_time
+        max_time=sim_time,
+        seed=seed
     )
     
-    print(f"Initial conditions shape: {initial_conditions.shape}")
-    print(f"Forcing terms shape: {forcing_terms.shape}")
+    log_info(f"Initial conditions shape: {initial_conditions.shape}")
+    log_info(f"Forcing terms shape: {forcing_terms.shape}")
     
     # Run simulations in batches to manage memory
     batch_size = 1000  # Process 1000 trajectories at a time
@@ -352,14 +481,19 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
     u_data = torch.cat(all_trajectories, dim=0)
     f_data = forcing_terms
     
-    print(f"Generated training data:")
-    print(f"  - u_data shape: {u_data.shape}")
-    print(f"  - f_data shape: {f_data.shape}")
+    log_info(f"Generated training data:")
+    log_info(f"  - u_data shape: {u_data.shape}")
+    log_info(f"  - f_data shape: {f_data.shape}")
+    
+    # Save data if path is provided
+    if train_file_path is not None:
+        save_training_data_hf(u_data, f_data, train_file_path)
     
     return u_data, f_data
 
 def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128,
-                      viscosity=0.01, sim_time=0.1, time_step=1e-4):
+                      viscosity=0.01, sim_time=0.1, time_step=1e-4, seed=None,
+                      test_file_path=None):
     """
     Generate test data with only initial and final states (no actions).
     
@@ -370,11 +504,17 @@ def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128
         viscosity: Viscosity parameter
         sim_time: Total simulation time
         time_step: Time step for simulation
+        seed: Random seed for reproducibility
+        test_file_path: Path to save the test data
         
     Returns:
         torch.Tensor: Test trajectories (N, T+1, spatial_size) containing full trajectories
     """
-    print(f"\nGenerating {num_trajectories} test trajectories...")
+    log_info(f"\nGenerating {num_trajectories} test trajectories...")
+    if seed is not None:
+        log_info(f"Random seed: {seed}")
+    if test_file_path is not None:
+        log_info(f"Will save test data to: {test_file_path}")
     
     # Generate initial conditions and forcing terms
     initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
@@ -383,7 +523,8 @@ def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128
         spatial_size=spatial_size,
         num_time_points=num_time_points,
         scaling_factor=1.0,
-        max_time=sim_time
+        max_time=sim_time,
+        seed=seed
     )
     
     # Run simulation
@@ -397,13 +538,17 @@ def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128
         print_progress=True
     )
     
-    print(f"Generated test data shape: {test_trajectories.shape}")
+    log_info(f"Generated test data shape: {test_trajectories.shape}")
+    
+    # Save data if path is provided
+    if test_file_path is not None:
+        save_test_data_hf(test_trajectories, test_file_path)
     
     return test_trajectories
 
 def save_training_data_hf(u_data, f_data, file_path):
     """Save training data using Hugging Face datasets."""
-    print(f"\nSaving training data to {file_path}")
+    log_info(f"\nSaving training data to {file_path}")
     
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -430,11 +575,11 @@ def save_training_data_hf(u_data, f_data, file_path):
     # Save dataset
     dataset.save_to_disk(file_path)
     
-    print(f"Saved training data with shape: {u_data.shape}")
+    log_info(f"Saved training data with shape: {u_data.shape}")
 
 def save_test_data_hf(test_data, file_path):
     """Save test data using Hugging Face datasets."""
-    print(f"\nSaving test data to {file_path}")
+    log_info(f"\nSaving test data to {file_path}")
     
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -459,10 +604,19 @@ def save_test_data_hf(test_data, file_path):
     # Save dataset
     dataset.save_to_disk(file_path)
     
-    print(f"Saved test data with shape: {test_data.shape}")
+    log_info(f"Saved test data with shape: {test_data.shape}")
 
-def generate_small_dataset_for_testing():
+def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_path=None,
+                                      log_file_path=None):
     """Generate a small test dataset for validation."""
+    # Setup logging
+    if log_file_path is None:
+        log_file_path = f"burgers_small_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logger, actual_log_path = setup_logging(log_file_path, "small_dataset")
+    
+    # Set random seeds for reproducibility
+    set_random_seeds(seed)
+    
     # Small dataset parameters
     num_train_trajectories = 100
     num_test_trajectories = 10
@@ -472,12 +626,22 @@ def generate_small_dataset_for_testing():
     sim_time = 0.1
     time_step = 1e-4
     
-    print("="*50)
-    print("GENERATING SMALL TEST DATASET")
-    print("="*50)
-    print(f"Training trajectories: {num_train_trajectories}")
-    print(f"Test trajectories: {num_test_trajectories}")
-    print(f"Parameters: viscosity={viscosity}, sim_time={sim_time}, time_step={time_step}")
+    # Default file paths if not provided
+    if train_file_path is None:
+        train_file_path = "../1d_burgers/burgers_train_small"
+    if test_file_path is None:
+        test_file_path = "../1d_burgers/unsafe_test_small"
+    
+    log_info("="*50)
+    log_info("GENERATING SMALL TEST DATASET")
+    log_info("="*50)
+    log_info(f"Training trajectories: {num_train_trajectories}")
+    log_info(f"Test trajectories: {num_test_trajectories}")
+    log_info(f"Parameters: viscosity={viscosity}, sim_time={sim_time}, time_step={time_step}")
+    log_info(f"Random seed: {seed}")
+    log_info(f"Train file path: {train_file_path}")
+    log_info(f"Test file path: {test_file_path}")
+    log_info(f"Log file: {actual_log_path}")
     
     # Generate training data
     u_data, f_data = generate_training_data(
@@ -486,7 +650,9 @@ def generate_small_dataset_for_testing():
         spatial_size=spatial_size,
         viscosity=viscosity,
         sim_time=sim_time,
-        time_step=time_step
+        time_step=time_step,
+        seed=seed,
+        train_file_path=train_file_path
     )
     
     # Generate test data
@@ -496,31 +662,35 @@ def generate_small_dataset_for_testing():
         spatial_size=spatial_size,
         viscosity=viscosity,
         sim_time=sim_time,
-        time_step=time_step
+        time_step=time_step,
+        seed=seed + 1000,  # Different seed for test data
+        test_file_path=test_file_path
     )
     
-    # File paths
-    train_file = "../1d_burgers/burgers_train_small"
-    test_file = "../1d_burgers/unsafe_test_small"
+    log_info("\n" + "="*50)
+    log_info("SMALL DATASET GENERATION COMPLETE")
+    log_info("="*50)
+    log_info(f"Training data shape: {u_data.shape}")
+    log_info(f"Training actions shape: {f_data.shape}")
+    log_info(f"Test data shape: {test_data.shape}")
+    log_info(f"Files saved:")
+    log_info(f"  - {train_file_path}")
+    log_info(f"  - {test_file_path}")
+    log_info(f"  - Log: {actual_log_path}")
     
-    # Save data
-    save_training_data_hf(u_data, f_data, train_file)
-    save_test_data_hf(test_data, test_file)
-    
-    print("\n" + "="*50)
-    print("SMALL DATASET GENERATION COMPLETE")
-    print("="*50)
-    print(f"Training data shape: {u_data.shape}")
-    print(f"Training actions shape: {f_data.shape}")
-    print(f"Test data shape: {test_data.shape}")
-    print(f"Files saved:")
-    print(f"  - {train_file}")
-    print(f"  - {test_file}")
-    
-    return train_file, test_file
+    return train_file_path, test_file_path, actual_log_path
 
-def generate_full_dataset():
+def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
+                         log_file_path=None):
     """Generate the full production dataset."""
+    # Setup logging
+    if log_file_path is None:
+        log_file_path = f"burgers_full_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logger, actual_log_path = setup_logging(log_file_path, "full_dataset")
+    
+    # Set random seeds for reproducibility
+    set_random_seeds(seed)
+    
     # Data generation parameters
     num_train_trajectories = 100000  # Full 1e5 trajectories
     num_test_trajectories = 50
@@ -530,22 +700,28 @@ def generate_full_dataset():
     sim_time = 0.1
     time_step = 1e-4
     
-    # File paths for new data
-    new_train_file = "../1d_burgers/burgers_train_new"
-    new_test_file = "../1d_burgers/unsafe_test_new"
+    # Default file paths if not provided
+    if train_file_path is None:
+        train_file_path = "../1d_burgers/burgers_train_new"
+    if test_file_path is None:
+        test_file_path = "../1d_burgers/unsafe_test_new"
     
-    print("="*60)
-    print("GENERATING NEW BURGERS EQUATION DATASET")
-    print("="*60)
-    print(f"Training trajectories: {num_train_trajectories}")
-    print(f"Test trajectories: {num_test_trajectories}")
-    print(f"Time points: {num_time_points}")
-    print(f"Spatial size: {spatial_size}")
-    print(f"Simulation parameters:")
-    print(f"  - Viscosity: {viscosity}")
-    print(f"  - Simulation time: {sim_time}")
-    print(f"  - Time step: {time_step}")
-    print("="*60)
+    log_info("="*60)
+    log_info("GENERATING NEW BURGERS EQUATION DATASET")
+    log_info("="*60)
+    log_info(f"Training trajectories: {num_train_trajectories}")
+    log_info(f"Test trajectories: {num_test_trajectories}")
+    log_info(f"Time points: {num_time_points}")
+    log_info(f"Spatial size: {spatial_size}")
+    log_info(f"Random seed: {seed}")
+    log_info(f"Train file path: {train_file_path}")
+    log_info(f"Test file path: {test_file_path}")
+    log_info(f"Log file: {actual_log_path}")
+    log_info(f"Simulation parameters:")
+    log_info(f"  - Viscosity: {viscosity}")
+    log_info(f"  - Simulation time: {sim_time}")
+    log_info(f"  - Time step: {time_step}")
+    log_info("="*60)
     
     # Generate training data
     u_data, f_data = generate_training_data(
@@ -554,11 +730,10 @@ def generate_full_dataset():
         spatial_size=spatial_size,
         viscosity=viscosity,
         sim_time=sim_time,
-        time_step=time_step
+        time_step=time_step,
+        seed=seed,
+        train_file_path=train_file_path
     )
-    
-    # Save training data
-    save_training_data_hf(u_data, f_data, new_train_file)
     
     # Generate test data
     test_data = generate_test_data(
@@ -567,18 +742,30 @@ def generate_full_dataset():
         spatial_size=spatial_size,
         viscosity=viscosity,
         sim_time=sim_time,
-        time_step=time_step
+        time_step=time_step,
+        seed=seed + 1000,  # Different seed for test data
+        test_file_path=test_file_path
     )
     
-    # Save test data
-    save_test_data_hf(test_data, new_test_file)
+    log_info("\n" + "="*60)
+    log_info("DATA GENERATION COMPLETE")
+    log_info("="*60)
+    log_info(f"New training data saved to: {train_file_path}")
+    log_info(f"New test data saved to: {test_file_path}")
+    log_info(f"Generation log saved to: {actual_log_path}")
+    log_info("\n" + "="*50)
+    log_info("NEXT STEPS")
+    log_info("="*50)
+    log_info("1. The dataset paths in burgers.py are already updated to use the new data")
+    log_info("2. You can now train your PPO agent with consistent data")
+    log_info("3. Run environment validation with: python eval_on_testset.py")
+    log_info("4. Train your agent with the new consistent dataset")
     
-    print("\n" + "="*60)
-    print("DATA GENERATION COMPLETE")
-    print("="*60)
-    print(f"New training data saved to: {new_train_file}")
-    print(f"New test data saved to: {new_test_file}")
-    print("\nDataset paths are already updated in burgers.py")
+    return train_file_path, test_file_path, actual_log_path
+
+# ===============================
+# Evaluation and testing utils
+# ===============================
 
 # Default solver with pre-set parameters
 burgers_solver = partial(simulate_burgers_equation, viscosity=0.01, sim_time=0.1, time_step=1e-4)
@@ -616,11 +803,15 @@ def evaluate_model_performance(num_episodes, initial_state, target_state, action
     
     return mean_mse
 
-def test_one_time_point_simulation():
+def test_one_time_point_simulation(seed=42):
     """
     Tests that the one-time-point simulation produces the same results as the full simulation
     when applied sequentially.
     """
+    # Set random seed for reproducibility
+    if seed is not None:
+        np.random.seed(seed)
+        
     # Parameters
     num_samples = 2
     spatial_size = 64
@@ -631,7 +822,7 @@ def test_one_time_point_simulation():
     
     # Generate initial conditions and forcing terms
     initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
-        num_samples, num_samples, spatial_size, num_time_points, scaling_factor=1.0, max_time=sim_time
+        num_samples, num_samples, spatial_size, num_time_points, scaling_factor=1.0, max_time=sim_time, seed=seed
     )
     
     # Run full simulation
@@ -695,113 +886,92 @@ def test_one_time_point_simulation():
     
     # Compare results
     difference = torch.abs(full_simulation - step_by_step_simulation).max().item()
-    print(f"Maximum difference between full and step-by-step simulation: {difference}")
+    log_info(f"Maximum difference between full and step-by-step simulation: {difference}")
     
     assert difference < 1e-5, "Step-by-step simulation does not match full simulation"
-    print("Test passed: Step-by-step simulation matches full simulation")
+    log_info("Test passed: Step-by-step simulation matches full simulation")
     
     return full_simulation, step_by_step_simulation
 
-def discounted_cumsum(x: torch.Tensor, gamma: float) -> torch.Tensor:
+
+# ===============================
+# Logging utils
+# ===============================
+
+def setup_logging(log_file_path=None, mode="generation"):
     """
-    Calculate the discounted cumulative sum of x (can be rewards or costs).
+    Set up logging to capture all output to both console and file.
+    
+    Args:
+        log_file_path (str): Path to save the log file
+        mode (str): Mode description for log file naming
     """
-    cumsum = torch.zeros_like(x)
-    cumsum[-1] = x[-1]
-    for t in reversed(range(x.shape[0] - 1)):
-        cumsum[t] = x[t] + gamma * cumsum[t + 1]
-    return cumsum
-
-def get_squence_data(file_path=BURGERS_TRAIN_FILE_PATH):
-    # Load dataset using Hugging Face datasets
-    try:
-        dataset = load_from_disk(file_path)
-        dataset.set_format("torch")
-        
-        # Extract data from the dataset
-        u_data = dataset['trajectories'][:40000]  # Limit to 40k as before
-        f_data = dataset['actions'][:40000]
-        
-    except Exception as e:
-        print(f"Warning: Could not load dataset from {file_path}. Error: {e}")
-        print("Falling back to HDF5 format...")
-        # Fallback to HDF5 if datasets format doesn't exist
-        with h5py.File(file_path + ".h5", 'r') as hdf:
-            print("Keys: ", list(hdf.keys()))
-            u_data = torch.tensor(hdf['train']['pde_11-128'][:40000])
-            f_data = torch.tensor(hdf['train']['pde_11-128_f'][:40000])
-        
-    # [s_0, s_1, s_2, ..., s_n - 1]
-    # [a_0, a_1, a_2, ..., a_n - 1]
-    # [r_1, r_2, r_3, ..., r_n]
-    # [c_1, c_2, c_3, ..., c_n]
-        
-    rewards = -(u_data[:, -1].unsqueeze(1) - u_data[:, 1:]).square().mean(-1)
+    if log_file_path is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file_path = f"burgers_{mode}_{timestamp}.log"
     
-    terminals = np.zeros(rewards.shape, dtype=np.bool_)
-    terminals[:, -1] = True
-
-    data = dict(
-        observations=u_data[:, :-1].numpy(),
-        actions=f_data.numpy(),
-        rewards=rewards.numpy(),
-        targets=u_data[:, -1].numpy(),
-    )
-    return data
-
-def get_test_data(file_path=BURGERS_TEST_FILE_PATH):
-    # Load dataset using Hugging Face datasets
-    try:
-        dataset = load_from_disk(file_path)
-        dataset.set_format("torch")
-        
-        # Extract data from the dataset
-        u_test = dataset['trajectories']
-        
-    except Exception as e:
-        print(f"Warning: Could not load dataset from {file_path}. Error: {e}")
-        print("Falling back to HDF5 format...")
-        # Fallback to HDF5 if datasets format doesn't exist
-        with h5py.File(file_path + ".h5", 'r') as hdf:
-            u_test = torch.tensor(hdf['test'][:])
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(log_file_path) if os.path.dirname(log_file_path) else ".", exist_ok=True)
     
-    rewards = -((u_test[:, -1][:, None, :] - u_test[:, 1:]) ** 2).mean(-1)
-    observations = u_test[:, :-1]
-    targets = u_test[:, -1]
-        
-    data = dict(
-        observations=observations.numpy(),
-        actions=[None] * len(observations),
-        rewards=rewards.numpy(),
-        targets=targets.numpy(),
-    )
-    return data
-
-class BurgersDataset(torch.utils.data.Dataset):
-    def __init__(self, mode: str):
-        assert mode in ["train", "test"]
-        if mode == "train":
-            self.data = get_squence_data(BURGERS_TRAIN_FILE_PATH)
-        elif mode == "test":
-            self.data = get_test_data(BURGERS_TEST_FILE_PATH)
-        else:
-            raise ValueError(f"Invalid mode: {mode}")
-        
-    def __len__(self):
-        return len(self.data['observations'])
+    # Create logger
+    logger = logging.getLogger('burgers_generation')
+    logger.setLevel(logging.INFO)
     
-    def __getitem__(self, idx):
-        observations = self.data['observations'][idx]
-        actions = self.data['actions'][idx]
-        rewards = self.data['rewards'][idx]
-        targets = self.data['targets'][idx]
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file_path)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    logger.info(f"Logging initialized. Log file: {log_file_path}")
+    return logger, log_file_path
+
+def log_info(message):
+    """Helper function to log info messages."""
+    logger = logging.getLogger('burgers_generation')
+    if logger.hasHandlers():
+        logger.info(message)
+    else:
+        print(message)
         
-        return dict(
-            observations=observations,
-            actions=actions,
-            rewards=rewards,
-            targets=targets,
-        )
+# ===============================
+# Random seed utils
+# ===============================
+
+def set_random_seeds(seed=42):
+    """
+    Set random seeds for reproducibility.
+    
+    Args:
+        seed (int): Random seed value
+    """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # for multi-GPU
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    # Additional settings for deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    log_info(f"Random seeds set to: {seed}")
+
+# ===============================
+# Main function
+# ===============================
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Burgers equation simulation and data generation")
@@ -809,23 +979,42 @@ if __name__ == "__main__":
                        help="Mode: 'test' runs simulation test, 'small' generates small dataset, 'full' generates full dataset")
     parser.add_argument("--validate", action="store_true", 
                        help="Run environment validation after generating small dataset")
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--train_file", type=str, default=None,
+                       help="Path to save training data (default: auto-generated)")
+    parser.add_argument("--test_file", type=str, default=None,
+                       help="Path to save test data (default: auto-generated)")
+    parser.add_argument("--log_file", type=str, default=None,
+                       help="Path to save generation log (default: auto-generated)")
     
     args = parser.parse_args()
     
     if args.mode == "test":
         # Run the original test
-        print("Running simulation validation test...")
-        test_one_time_point_simulation()
+        log_file_path = args.log_file or f"burgers_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        logger, actual_log_path = setup_logging(log_file_path, "test")
+        
+        log_info("Running simulation validation test...")
+        # Set seed for test reproducibility
+        set_random_seeds(args.seed)
+        test_one_time_point_simulation(args.seed)
+        log_info(f"Test completed successfully. Log saved to: {actual_log_path}")
         
     elif args.mode == "small":
         # Generate small dataset for testing
-        train_file, test_file = generate_small_dataset_for_testing()
+        train_file, test_file, log_file = generate_small_dataset_for_testing(
+            seed=args.seed,
+            train_file_path=args.train_file,
+            test_file_path=args.test_file,
+            log_file_path=args.log_file
+        )
         
         if args.validate:
             # Test with environment check
-            print("\n" + "="*50)
-            print("TESTING GENERATED DATA WITH ENVIRONMENT CHECK")
-            print("="*50)
+            log_info("\n" + "="*50)
+            log_info("TESTING GENERATED DATA WITH ENVIRONMENT CHECK")
+            log_info("="*50)
             
             # Temporarily update the paths
             original_train_path = BURGERS_TRAIN_FILE_PATH
@@ -837,7 +1026,6 @@ if __name__ == "__main__":
             
             try:
                 # Test with our environment check (need to import here to avoid circular imports)
-                import sys
                 sys.path.append('.')
                 from eval_on_testset import test_environment_with_training_data
                 
@@ -852,14 +1040,14 @@ if __name__ == "__main__":
                     time_step=1e-4
                 )
                 
-                print(f"\nEnvironment check result: Mean MSE = {mean_mse:.10f}")
+                log_info(f"\nEnvironment check result: Mean MSE = {mean_mse:.10f}")
                 if mean_mse < 1e-10:
-                    print("✓ SUCCESS: Generated data is perfectly consistent!")
+                    log_info("✓ SUCCESS: Generated data is perfectly consistent!")
                 else:
-                    print("❌ WARNING: Generated data may have issues")
+                    log_info("❌ WARNING: Generated data may have issues")
                     
             except ImportError:
-                print("Note: eval_on_testset.py not found, skipping validation")
+                log_info("Note: eval_on_testset.py not found, skipping validation")
             finally:
                 # Restore original paths
                 globals()['BURGERS_TRAIN_FILE_PATH'] = original_train_path
@@ -867,14 +1055,11 @@ if __name__ == "__main__":
                 
     elif args.mode == "full":
         # Generate full production dataset
-        generate_full_dataset()
+        train_file, test_file, log_file = generate_full_dataset(
+            seed=args.seed,
+            train_file_path=args.train_file,
+            test_file_path=args.test_file,
+            log_file_path=args.log_file
+        )
         
-        print("\n" + "="*50)
-        print("NEXT STEPS")
-        print("="*50)
-        print("1. The dataset paths in burgers.py are already updated to use the new data")
-        print("2. You can now train your PPO agent with consistent data")
-        print("3. Run environment validation with: python eval_on_testset.py")
-        print("4. Train your agent with the new consistent dataset")
-        
-    print("\nDone!")
+    log_info("\nDone!")
