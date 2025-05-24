@@ -13,7 +13,7 @@ import random
 import logging
 import sys
 from datetime import datetime
-from utils.utils import setup_logging, get_logger_functions
+from .utils.utils import setup_logging, get_logger_functions
 
 try:
     import h5py

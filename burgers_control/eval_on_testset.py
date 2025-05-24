@@ -17,8 +17,8 @@ import argparse
 import torch
 import numpy as np
 import math
-from ppo import load_saved_agent
-from burgers import (
+from .ppo import load_saved_agent
+from .burgers import (
     create_differential_matrices_1d, 
     simulate_burgers_one_time_point,
     get_test_data,
@@ -27,7 +27,7 @@ from burgers import (
     BURGERS_TRAIN_FILE_PATH,
     burgers_solver
 )
-from utils.utils import setup_logging, get_logger_functions
+from .utils.utils import setup_logging, get_logger_functions
 
 setup_logging(logger_name="eval_on_testset")
 log_info, log_warning, log_error = get_logger_functions("eval_on_testset")

@@ -22,16 +22,16 @@ import tyro
 import wandb
 
 # Import utility function to load environment variables
-from utils.utils import load_environment_variables
+from .utils.utils import load_environment_variables
 load_environment_variables()
 
-from burgers_onthefly_env import BurgersOnTheFlyVecEnv
+from .burgers_onthefly_env import BurgersOnTheFlyVecEnv
 from tensordict import from_module
 from tensordict.nn import CudaGraphModule
 from torch.distributions.normal import Normal
-from layers import MLP, get_activation_fn
-from pretrain_policy import PolicyNetwork
-from utils.save_load import save_load
+from .layers import MLP, get_activation_fn
+from .pretrain_policy import PolicyNetwork
+from .utils.save_load import save_load
 
 import datetime
 
@@ -359,7 +359,7 @@ def load_saved_agent(checkpoint_path: str, device: Optional[torch.device] = None
 
 if __name__ == "__main__":
     # Load environment variables from .env file
-    from utils.utils import load_environment_variables
+    from .utils.utils import load_environment_variables
     load_environment_variables()
     
     args = tyro.cli(Args)

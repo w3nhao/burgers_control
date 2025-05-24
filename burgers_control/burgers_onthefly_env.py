@@ -7,7 +7,7 @@ from typing import Dict, Tuple, Any, Optional, List, Union
 import torch.nn.functional as F
 
 # Import functions from burgers.py
-from burgers import (
+from .burgers import (
     create_differential_matrices_1d,
     make_initial_conditions_and_varying_forcing_terms,
     simulate_burgers_equation

@@ -1,0 +1,14 @@
+include README.md
+include LICENSE
+include requirements.txt
+include .env-example
+recursive-include burgers_control *.py
+recursive-include scripts *.sh
+recursive-exclude examples *
+recursive-exclude .git *
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc *
+recursive-exclude .pytest_cache *
+recursive-exclude wandb *
+recursive-exclude logs *
+recursive-exclude checkpoints * 
