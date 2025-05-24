@@ -15,7 +15,7 @@ where:
 - `ν` is the viscosity (default: 0.01)
 - `f(x,t)` represents control inputs/forcing terms
 
-The system generates training data on-the-fly and trains policies to steer PDE solutions from initial states to target states.
+The system generates training data on-the-fly and trains policies to steer PDE solutions from initial states to target states. The agents are goal-conditioned, receiving observations that include both the current state and target state, enabling flexible control towards specified goals.
 
 ## Installation
 
@@ -56,7 +56,8 @@ burgers-train \
 # Evaluate trained agent on test dataset  
 burgers-eval \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
-    --num_trajectories 50
+    --num_trajectories 50 \
+    --mode final_state
 
 # Test agent in environment
 burgers-eval-env \
@@ -171,13 +172,40 @@ burgers-train \
 
 ### Test Dataset Evaluation
 
+The evaluation script supports two goal-conditioned modes:
+
+#### Final State Mode (Default)
+Uses the final target state as the goal for all time steps during evaluation.
+
 ```bash
-# Evaluate agent on 50 test trajectories
+# Evaluate agent on 50 test trajectories (final_state mode)
 burgers-eval \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
     --num_trajectories 50 \
+    --mode final_state \
     --device cuda:0
+```
 
+#### Next State Mode
+Uses the next state in the trajectory sequence as the target for each time step.
+
+```bash
+# Evaluate agent using next state as target (more challenging)
+burgers-eval \
+    --checkpoint_path checkpoints/run_name/agent_final.pt \
+    --num_trajectories 50 \
+    --mode next_state \
+    --device cuda:0
+```
+
+#### Mode Comparison
+- **final_state**: Agent knows the final target throughout the trajectory (easier task)
+- **next_state**: Agent must follow intermediate states step-by-step (harder task)
+
+The next_state mode typically results in higher MSE as it requires more precise control at each timestep.
+
+#### Environment Validation
+```bash
 # Environment validation (should give MSE ≈ 0)
 burgers-eval --num_trajectories 10
 ```
@@ -200,6 +228,13 @@ burgers-eval-env \
 - `viscosity`: PDE viscosity coefficient (default: 0.01)
 - `sim_time`: Physical simulation time (default: 0.1)
 - `reward_type`: Reward function ("vanilla", "inverse_mse", "exp_scaled_mse")
+
+### Evaluation Parameters
+- `mode`: Goal-conditioned evaluation mode ("final_state", "next_state")
+  - `final_state`: Use final target state as goal for all time steps (default)
+  - `next_state`: Use next state in sequence as target for each time step
+- `num_trajectories`: Number of test trajectories to evaluate (default: 50)
+- `device`: Computation device ("cuda:0", "cpu", "auto")
 
 ### PPO Hyperparameters
 - `num_envs`: Parallel environments (default: 8192)
