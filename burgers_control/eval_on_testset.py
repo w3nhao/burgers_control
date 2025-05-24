@@ -12,7 +12,7 @@ Usage:
     python test_agent_on_dataset.py --checkpoint_path checkpoints/run_name/agent_final.pt
     python test_agent_on_dataset.py  # Environment check mode
 """
-
+import os
 import argparse
 import torch
 import numpy as np
@@ -23,11 +23,12 @@ from .burgers import (
     simulate_burgers_one_time_point,
     get_test_data,
     get_squence_data,
-    BURGERS_TEST_FILE_PATH,
-    BURGERS_TRAIN_FILE_PATH,
     burgers_solver
 )
 from .utils.utils import setup_logging, get_logger_functions
+
+BURGERS_TEST_FILE_PATH = os.getenv("BURGERS_TEST_FILE_PATH")
+BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
 
 setup_logging(logger_name="eval_on_testset")
 log_info, log_warning, log_error = get_logger_functions("eval_on_testset")
@@ -71,7 +72,7 @@ def setup_simulation_matrices(spatial_size, viscosity, device):
     return transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step
 
 def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10, 
-                         viscosity=0.01, sim_time=0.1, time_step=1e-4):
+                         viscosity=0.01, sim_time=0.1, time_step=1e-4, mode="final_state"):
     """
     Test agent on pre-generated test dataset using one-step simulation.
     
@@ -83,21 +84,33 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
         viscosity: Viscosity parameter
         sim_time: Total simulation time
         time_step: Time step for simulation
+        mode: Target mode for goal-conditioned agent
+            - "final_state": Use final target state as goal for all time steps (default)
+            - "next_state": Use next state in sequence as target for each time step
         
     Returns:
         float: Mean MSE over all test trajectories
     """
+    if mode not in ["final_state", "next_state"]:
+        raise ValueError(f"Invalid mode '{mode}'. Must be 'final_state' or 'next_state'")
+    
     # Load test data
     test_data = get_test_data(BURGERS_TEST_FILE_PATH)
     
     # Extract initial states and target states for the first num_trajectories
     initial_states = test_data['observations'][:num_trajectories, 0, :]  # Shape: (N, spatial_size)
-    target_states = test_data['targets'][:num_trajectories, :]           # Shape: (N, spatial_size)
+    final_targets = test_data['targets'][:num_trajectories, :]           # Shape: (N, spatial_size)
+    
+    # For next_state mode, we also need the full observation sequences
+    if mode == "next_state":
+        full_observations = test_data['observations'][:num_trajectories]  # Shape: (N, T-1, spatial_size)
     
     spatial_size = initial_states.shape[1]
-    log_info(f"Testing on {num_trajectories} trajectories")
+    log_info(f"Testing on {num_trajectories} trajectories in '{mode}' mode")
     log_info(f"Initial states shape: {initial_states.shape}")
-    log_info(f"Target states shape: {target_states.shape}")
+    log_info(f"Final target states shape: {final_targets.shape}")
+    if mode == "next_state":
+        log_info(f"Full observations shape: {full_observations.shape}")
     log_info(f"Spatial size: {spatial_size}")
     
     # Setup simulation matrices
@@ -110,7 +123,10 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     
     # Convert to tensors and move to device
     initial_states = torch.tensor(initial_states, device=device, dtype=torch.float32)
-    target_states = torch.tensor(target_states, device=device, dtype=torch.float32)
+    final_targets = torch.tensor(final_targets, device=device, dtype=torch.float32)
+    
+    if mode == "next_state":
+        full_observations = torch.tensor(full_observations, device=device, dtype=torch.float32)
     
     # Set agent to evaluation mode
     agent.eval()
@@ -119,13 +135,13 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     all_mse_values = []
     
     log_info("="*50)
-    log_info("RUNNING AGENT EVALUATION")
+    log_info(f"RUNNING AGENT EVALUATION - {mode.upper()} MODE")
     log_info("="*50)
     
     for traj_idx in range(num_trajectories):
         # Get initial state for this trajectory
         current_state = initial_states[traj_idx:traj_idx+1]  # Shape: (1, spatial_size)
-        target_state = target_states[traj_idx:traj_idx+1]    # Shape: (1, spatial_size)
+        final_target = final_targets[traj_idx:traj_idx+1]    # Shape: (1, spatial_size)
         
         # Pad state for boundary conditions
         state = torch.nn.functional.pad(current_state, (1, 1))  # Add boundary padding
@@ -133,7 +149,24 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
         # Run simulation for num_time_points
         for time_idx in range(num_time_points):
             # Get observation for agent (remove padding)
-            obs = state[..., 1:-1]  # Shape: (1, spatial_size)
+            current_obs = state[..., 1:-1]  # Shape: (1, spatial_size)
+            
+            # Determine target state based on mode
+            if mode == "final_state":
+                # Use final target state for all time steps
+                target_state = final_target
+            elif mode == "next_state":
+                # Use next state in sequence as target
+                if time_idx < num_time_points - 1:
+                    # Use next observation from the test data
+                    next_obs_idx = min(time_idx + 1, full_observations.shape[1] - 1)
+                    target_state = full_observations[traj_idx:traj_idx+1, next_obs_idx, :]  # Shape: (1, spatial_size)
+                else:
+                    # For the last time step, use final target
+                    target_state = final_target
+            
+            # Create goal-conditioned observation: concatenate current state and target state
+            obs = torch.cat([current_obs, target_state], dim=-1)  # Shape: (1, 2*spatial_size)
             
             # Get action from agent
             with torch.no_grad():
@@ -153,8 +186,8 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
         final_state = state[..., 1:-1]
         all_final_states.append(final_state)
         
-        # Calculate MSE for this trajectory
-        mse = ((final_state - target_state) ** 2).mean().item()
+        # Calculate MSE for this trajectory (always against final target)
+        mse = ((final_state - final_target) ** 2).mean().item()
         all_mse_values.append(mse)
         
         # Show progress - more frequent for small numbers of trajectories
@@ -170,6 +203,7 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     log_info("="*50)
     log_info("FINAL RESULTS")
     log_info("="*50)
+    log_info(f"Mode: {mode}")
     log_info(f"J_mean_mse (Mean MSE over {num_trajectories} trajectories): {mean_mse:.6f}")
     log_info(f"Standard deviation: {std_mse:.6f}")
     log_info(f"Minimum MSE: {min_mse:.6f}")
@@ -454,6 +488,9 @@ def main():
                        help="Total simulation time")
     parser.add_argument("--time_step", type=float, default=1e-4,
                        help="Time step for simulation")
+    parser.add_argument("--mode", type=str, default="final_state",
+                       choices=["final_state", "next_state"],
+                       help="Target mode for goal-conditioned agent: 'final_state' (use final target for all steps) or 'next_state' (use next state as target)")
     
     args = parser.parse_args()
     
@@ -474,11 +511,20 @@ def main():
         log_info("="*50)
         log_info("LOADED AGENT INFO")
         log_info("="*50)
-        log_info(f"Training iteration: {metadata.get('iteration', 'unknown')}")
-        log_info(f"Global step: {metadata.get('global_step', 'unknown')}")
-        log_info(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
+        # Access nested metadata structure
+        nested_metadata = metadata.get('metadata', {})
+        log_info(f"Training iteration: {nested_metadata.get('iteration', 'unknown')}")
+        log_info(f"Global step: {nested_metadata.get('global_step', 'unknown')}")
+        log_info(f"Episode return mean: {nested_metadata.get('episode_return_mean', 'unknown')}")
         log_info(f"Version: {metadata.get('version', 'unknown')}")
         log_info(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
+        
+        # Print training arguments if available
+        training_args = nested_metadata.get('args', {})
+        if training_args:
+            log_info(f"Training spatial size: {training_args.get('spatial_size', 'unknown')}")
+            log_info(f"Training viscosity: {training_args.get('viscosity', 'unknown')}")
+            log_info(f"Training reward type: {training_args.get('reward_type', 'unknown')}")
         
         # Test the agent on the dataset
         mean_mse, all_mse_values = test_agent_on_dataset(
@@ -488,7 +534,8 @@ def main():
             num_time_points=args.num_time_points,
             viscosity=args.viscosity,
             sim_time=args.sim_time,
-            time_step=args.time_step
+            time_step=args.time_step,
+            mode=args.mode
         )
         
         log_info("="*50)
