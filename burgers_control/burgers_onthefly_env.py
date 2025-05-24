@@ -9,8 +9,8 @@ import torch.nn.functional as F
 # Import functions from burgers.py
 from burgers_control.burgers import (
     create_differential_matrices_1d,
-    make_initial_conditions_and_varying_forcing_terms,
-    simulate_burgers_equation
+    make_initial_conditions_and_varying_forcing_terms_accelerated as make_initial_conditions_and_varying_forcing_terms,
+    simulate_burgers_equation_accelerated as simulate_burgers_equation
 )
 
 class BurgersOnTheFlyVecEnv(VectorEnv):

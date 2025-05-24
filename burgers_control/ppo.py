@@ -42,7 +42,7 @@ class Args:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: int = 1
+    cuda: int = 2
     """cuda device to use"""
 
     # Environment specific arguments
