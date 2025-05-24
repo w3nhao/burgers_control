@@ -101,21 +101,21 @@ class Args:
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 1
     """the discount factor gamma"""
-    gae_lambda: float = 0.95
+    gae_lambda: float = 0.99
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 256
+    num_minibatches: int = 512
     """the number of mini-batches"""
-    update_epochs: int = 10
+    update_epochs: int = 20
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
-    clip_coef: float = 0.2
+    clip_coef: float = 0.1
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 1e-5
+    ent_coef: float = 1e-3
     """coefficient of the entropy"""
-    vf_coef: float = 0.5
+    vf_coef: float = 1.0
     """coefficient of the value function"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
