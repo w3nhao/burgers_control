@@ -1,3 +1,19 @@
+"""
+Goal-Conditioned Policy Pretraining for Burgers' Equation Control
+
+This script pretrains a policy network for the goal-conditioned Burgers' equation control task.
+The environment provides observations as [current_state, target_state] and expects actions (forcing terms).
+
+Key aspects of goal-conditioning:
+- Environment observations: [current_state, target_state] (shape: 2 * spatial_size)
+- Policy input: [current_state, target_state] (same as environment)
+- Policy output: action/forcing terms (shape: spatial_size)
+- Dataset: Creates (observation, action) pairs from historical trajectories
+  where observation = [state_t, target] and action = action_t
+
+This ensures the pretrained policy is compatible with the goal-conditioned RL environment.
+"""
+
 import os
 import random
 import time
@@ -17,7 +33,6 @@ from burgers_control.layers import MLP, get_activation_fn
 from burgers_control.burgers import BurgersDataset
 from burgers_control.utils.utils import load_environment_variables
 
-BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
 
 # Import save_load decorator for model persistence
 from burgers_control.utils.save_load import save_load
@@ -68,77 +83,85 @@ class PretrainArgs:
     # Data specific
     max_samples: Optional[int] = None
     """maximum number of samples to use (None for all)"""
+    train_file_path: str = ""
+    """path to the training dataset file"""
 
 class StateTransitionDataset(Dataset):
     """
-    Dataset that creates (s_prev, s_next, action) tuples from BurgersDataset.
+    Dataset that creates (current_state, target, action) tuples from BurgersDataset.
     
-    The idea is to train the policy to predict the action given the state transition,
-    i.e., given (s_t, s_{t+1}), predict action a_t that caused the transition.
+    This matches the goal-conditioned environment interface where observations are
+    [current_state, target_state] and we predict the action that was taken.
+    The idea is to train the policy to predict the action given the current state and target goal,
+    i.e., given (s_t, target), predict action a_t.
     """
     
-    def __init__(self, max_samples: Optional[int] = None):
+    def __init__(self, train_file_path: str, max_samples: Optional[int] = None):
         # Load the burgers dataset
-        burgers_data = BurgersDataset(mode="train")
+        if not train_file_path:
+            raise ValueError("train_file_path must be provided")
+        burgers_data = BurgersDataset(mode="train", train_file_path=train_file_path)
         
-        self.state_transitions = []
+        self.observations = []  # Will store [current_state, target]
         self.actions = []
         
-        print("Creating state transition dataset...")
+        print("Creating goal-conditioned state-action dataset...")
         
         # Process each trajectory
         for idx in tqdm.trange(len(burgers_data), desc="Processing trajectories"):
             sample = burgers_data[idx]
             observations = sample['observations']  # Shape: (T-1, spatial_size)
             actions = sample['actions']           # Shape: (T, spatial_size)
+            target = sample['targets']            # Shape: (spatial_size,) - final target state
             
-            # Create state transition pairs
-            # observations[i] = s_i, observations[i+1] = s_{i+1}, actions[i] = a_i
-            for t in range(len(observations) - 1):
-                s_prev = observations[t]      # s_t
-                s_next = observations[t + 1]  # s_{t+1}
-                action = actions[t]           # a_t (action that caused s_t -> s_{t+1})
+            # Create goal-conditioned (state, target) -> action pairs
+            # Each observation at time t with the target and corresponding action
+            for t in range(len(observations)):
+                current_state = observations[t]   # s_t
+                action = actions[t]               # a_t (action taken from s_t)
                 
-                # Concatenate s_prev and s_next as input
-                state_transition = np.concatenate([s_prev, s_next])
+                # Concatenate current_state and target as observation (goal-conditioned)
+                observation = np.concatenate([current_state, target])
                 
-                self.state_transitions.append(state_transition)
+                self.observations.append(observation)
                 self.actions.append(action)
                 
                 # Limit number of samples if specified
-                if max_samples is not None and len(self.state_transitions) >= max_samples:
+                if max_samples is not None and len(self.observations) >= max_samples:
                     break
             
-            if max_samples is not None and len(self.state_transitions) >= max_samples:
+            if max_samples is not None and len(self.observations) >= max_samples:
                 break
         
-        self.state_transitions = np.array(self.state_transitions)
+        self.observations = np.array(self.observations)
         self.actions = np.array(self.actions)
         
-        print(f"Created dataset with {len(self.state_transitions)} state transition samples")
-        print(f"State transition shape: {self.state_transitions.shape}")
+        print(f"Created goal-conditioned dataset with {len(self.observations)} (state, target) -> action samples")
+        print(f"Observations shape: {self.observations.shape}")
         print(f"Actions shape: {self.actions.shape}")
     
     def __len__(self):
-        return len(self.state_transitions)
+        return len(self.observations)
     
     def __getitem__(self, idx):
         return {
-            'state_transition': torch.tensor(self.state_transitions[idx], dtype=torch.float32),
+            'observation': torch.tensor(self.observations[idx], dtype=torch.float32),
             'action': torch.tensor(self.actions[idx], dtype=torch.float32)
         }
 
 @save_load(version="1.0.0")
 class PolicyNetwork(nn.Module):
     """
-    Policy network that predicts actions given state transitions.
+    Goal-conditioned policy network that predicts actions given current state and target.
     Uses the same architecture as the actor network in PPO.
+    Matches the environment interface where observations are [current_state, target_state].
     """
     
     def __init__(self, spatial_size: int, hidden_dims: List[int], act_fn: str = "gelu"):
         super().__init__()
         
-        # Input is concatenation of s_prev and s_next
+        # Input is concatenation of current_state and target (goal-conditioned)
+        # This matches the environment observation space
         input_dim = 2 * spatial_size
         # Output is the action (forcing terms)
         output_dim = spatial_size
@@ -154,17 +177,17 @@ class PolicyNetwork(nn.Module):
             use_bias=True
         )
     
-    def forward(self, state_transition):
+    def forward(self, observation):
         """
-        Forward pass to predict action from state transition.
+        Forward pass to predict action from goal-conditioned observation.
         
         Args:
-            state_transition: Tensor of shape (..., 2*spatial_size) containing [s_prev, s_next]
+            observation: Tensor of shape (..., 2*spatial_size) containing [current_state, target]
             
         Returns:
             Predicted action of shape (..., spatial_size)
         """
-        return self.policy_net(state_transition)
+        return self.policy_net(observation)
 
 def train_epoch(model, dataloader, optimizer, criterion, device):
     """Train for one epoch."""
@@ -173,12 +196,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     num_batches = 0
     
     for batch in dataloader:
-        state_transitions = batch['state_transition'].to(device)
+        observations = batch['observation'].to(device)
         target_actions = batch['action'].to(device)
         
         optimizer.zero_grad()
         
-        predicted_actions = model(state_transitions)
+        predicted_actions = model(observations)
         loss = criterion(predicted_actions, target_actions)
         
         loss.backward()
@@ -197,10 +220,10 @@ def validate_epoch(model, dataloader, criterion, device):
     
     with torch.no_grad():
         for batch in dataloader:
-            state_transitions = batch['state_transition'].to(device)
+            observations = batch['observation'].to(device)
             target_actions = batch['action'].to(device)
             
-            predicted_actions = model(state_transitions)
+            predicted_actions = model(observations)
             loss = criterion(predicted_actions, target_actions)
             
             total_loss += loss.item()
@@ -213,6 +236,10 @@ def main():
     load_environment_variables()
     
     args = tyro.cli(PretrainArgs)
+    
+    # Validate required arguments
+    if not args.train_file_path:
+        raise ValueError("train_file_path must be provided")
     
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
@@ -241,7 +268,7 @@ def main():
     
     # Create dataset
     print("Loading dataset...")
-    dataset = StateTransitionDataset(max_samples=args.max_samples)
+    dataset = StateTransitionDataset(train_file_path=args.train_file_path, max_samples=args.max_samples)
     
     # Split dataset into train and validation
     train_size = int(args.train_split * len(dataset))
