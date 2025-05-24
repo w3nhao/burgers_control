@@ -56,13 +56,25 @@ burgers-train \
 # Evaluate trained agent on test dataset  
 burgers-eval \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
+    --test_file_path /path/to/test/dataset \
     --num_trajectories 50 \
     --mode final_state
+
+# Environment validation using training data
+burgers-eval \
+    --train_file_path /path/to/training/dataset \
+    --num_trajectories 50
 
 # Test agent in environment
 burgers-eval-env \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
     --num_episodes 5
+
+# Pretrain policy with supervised learning
+burgers-pretrain \
+    --train_file_path /path/to/training/dataset \
+    --exp_name "policy_pretrain" \
+    --num_epochs 500
 ```
 
 It is highly recommended to tune the `learning_rate`, `ent_coef`, `num_minibatches` and `update_epochs` to get the best performance.
@@ -86,11 +98,22 @@ agent, metadata = load_saved_agent("path/to/checkpoint.pt")
 # Train PPO agent
 python -m burgers_control.ppo --num_envs 8192
 
-# Evaluate on test dataset
-python -m burgers_control.eval_on_testset --checkpoint_path path/to/agent.pt
+# Evaluate on test dataset (requires --test_file_path)
+python -m burgers_control.eval_on_testset \
+    --checkpoint_path path/to/agent.pt \
+    --test_file_path path/to/test/dataset
+
+# Environment validation (requires --train_file_path)
+python -m burgers_control.eval_on_testset \
+    --train_file_path path/to/training/dataset
 
 # Environment evaluation 
 python -m burgers_control.eval_on_env --checkpoint_path path/to/agent.pt
+
+# Policy pretraining (requires --train_file_path)
+python -m burgers_control.pretrain_policy \
+    --train_file_path path/to/training/dataset \
+    --exp_name "pretrain_experiment"
 ```
 
 ## Core Components
@@ -362,21 +385,56 @@ train_file, test_file, log_file = generate_full_dataset(
 )
 ```
 
-All simulation parameters (viscosity, sim_time, time_step, spatial_size, etc.) are automatically stored in the dataset metadata, ensuring reproducibility and enabling consistency validation.
-
-#### Custom Initial Conditions and Forcing Terms
+#### Load Data with File Paths
 ```python
-from burgers_control.burgers import make_initial_conditions_and_varying_forcing_terms
+from burgers_control.burgers import get_training_data_with_metadata, get_test_data_with_metadata
 
-initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
-    num_initial_conditions=100,
-    num_forcing_terms=100,
-    spatial_size=128,
-    num_time_points=10,
-    amplitude_compensation=2,
-    scaling_factor=1.0,
-    max_time=0.1,
-    seed=42
+# Load training data (requires file path)
+train_data, train_metadata = get_training_data_with_metadata("/path/to/training/dataset")
+
+# Load test data (requires file path)
+test_data, test_metadata = get_test_data_with_metadata("/path/to/test/dataset")
+
+# Use BurgersDataset (requires file path parameters)
+from burgers_control.burgers import BurgersDataset
+
+# For training data
+train_dataset = BurgersDataset(mode="train", train_file_path="/path/to/training/dataset")
+
+# For test data  
+test_dataset = BurgersDataset(mode="test", test_file_path="/path/to/test/dataset")
+```
+
+#### Evaluation Functions with File Paths
+```python
+from burgers_control.eval_on_testset import test_agent_on_dataset, test_environment_with_training_data
+
+# Test agent on dataset (requires test file path)
+mean_mse, all_mse_values = test_agent_on_dataset(
+    agent=agent,
+    agent_metadata=metadata,
+    device=device,
+    test_file_path="/path/to/test/dataset",
+    num_trajectories=50,
+    mode="final_state"
+)
+
+# Environment validation (requires training file path)
+mean_mse, all_mse_values = test_environment_with_training_data(
+    train_file_path="/path/to/training/dataset",
+    device=device,
+    num_trajectories=50
+)
+```
+
+#### Policy Pretraining with File Paths
+```python
+from burgers_control.pretrain_policy import StateTransitionDataset
+
+# Create dataset for pretraining (requires training file path)
+dataset = StateTransitionDataset(
+    train_file_path="/path/to/training/dataset",
+    max_samples=10000
 )
 ```
 
@@ -385,7 +443,9 @@ initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_
 #### Environment Consistency Check
 ```bash
 # Should return MSE ≈ 0 (perfect consistency)
-python -m burgers_control.eval_on_testset --num_trajectories 5
+python -m burgers_control.eval_on_testset \
+    --train_file_path /path/to/training/dataset \
+    --num_trajectories 5
 ```
 
 #### Simulation Algorithm Validation  
@@ -450,6 +510,7 @@ burgers-train \
 First, pretrain the policy:
 ```bash
 python -m burgers_control.pretrain_policy \
+    --train_file_path /path/to/training/dataset \
     --exp_name "pretrain_experiment" \
     --num_epochs 500 \
     --learning_rate 5e-4 \
@@ -491,6 +552,7 @@ Uses the final target state as the goal for all time steps during evaluation.
 # Evaluate agent on 50 test trajectories (final_state mode)
 burgers-eval \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
+    --test_file_path /path/to/test/dataset \
     --num_trajectories 50 \
     --mode final_state \
     --device cuda:0
@@ -503,6 +565,7 @@ Uses the next state in the trajectory sequence as the target for each time step.
 # Evaluate agent using next state as target (more challenging)
 burgers-eval \
     --checkpoint_path checkpoints/run_name/agent_final.pt \
+    --test_file_path /path/to/test/dataset \
     --num_trajectories 50 \
     --mode next_state \
     --device cuda:0
@@ -517,7 +580,9 @@ The next_state mode typically results in higher MSE as it requires more precise 
 #### Environment Validation
 ```bash
 # Environment validation (should give MSE ≈ 0)
-burgers-eval --num_trajectories 10
+burgers-eval \
+    --train_file_path /path/to/training/dataset \
+    --num_trajectories 50
 ```
 
 ### Interactive Environment Testing
@@ -603,10 +668,17 @@ Edit `.env` with your settings:
 WANDB_API_KEY=your_wandb_key
 WANDB_ENTITY=your_entity
 
-# Data paths (optional)
-BURGERS_TRAIN_FILE_PATH=/path/to/training/data
-BURGERS_TEST_FILE_PATH=/path/to/test/data
+# NOTE: Dataset file paths are no longer environment variables!
+# Use --train_file_path and --test_file_path parameters instead.
 ```
+
+**Important:** Dataset file paths (`BURGERS_TRAIN_FILE_PATH` and `BURGERS_TEST_FILE_PATH`) are no longer configured via environment variables. All scripts now require explicit file path parameters:
+
+- Use `--train_file_path` for training dataset
+- Use `--test_file_path` for test dataset  
+- Use `--train_file` and `--test_file` for data generation output paths
+
+This change ensures explicit data dependencies and makes scripts more portable and reproducible.
 
 ## Advanced Usage
 
@@ -672,7 +744,9 @@ Training automatically logs to Weights & Biases:
 ### Validation Test
 Run environment validation to ensure correct installation:
 ```bash
-burgers-eval --num_trajectories 5
+burgers-eval \
+    --train_file_path /path/to/training/dataset \
+    --num_trajectories 5
 ```
 Expected: MSE ≈ 0.0 (indicates perfect simulation consistency)
 
@@ -681,7 +755,8 @@ Expected: MSE ≈ 0.0 (indicates perfect simulation consistency)
 1. **Slow training**: Enable compilation with `--compile`
 2. **Package import errors**: Ensure installed with `pip install -e .`
 3. **Verify package installation**: `python -c "import burgers_control; print('OK')"`
-4. **Review logs**: `logs/` directory
+4. **Missing file path parameters**: All evaluation and pretraining scripts now require explicit `--train_file_path` or `--test_file_path` arguments
+5. **Review logs**: `logs/` directory
 
 ## Citation
 
@@ -699,3 +774,65 @@ If you use this package in your research, please cite:
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## File Path Requirements
+
+**Important:** Starting from this version, file paths are specified as **input parameters** rather than environment variables. Each script and function requires explicit file path arguments:
+
+### Required File Path Parameters
+
+#### Data Generation
+```bash
+# All data generation requires explicit output paths
+python -m burgers_control.burgers \
+    --mode full \
+    --train_file "/path/to/save/training/dataset" \
+    --test_file "/path/to/save/test/dataset"
+```
+
+#### Evaluation Scripts
+```bash
+# Agent evaluation requires test dataset path
+burgers-eval \
+    --checkpoint_path /path/to/agent.pt \
+    --test_file_path /path/to/test/dataset
+
+# Environment validation requires training dataset path  
+burgers-eval \
+    --train_file_path /path/to/training/dataset
+```
+
+#### Policy Pretraining
+```bash
+# Pretraining requires training dataset path
+python -m burgers_control.pretrain_policy \
+    --train_file_path /path/to/training/dataset \
+    --exp_name "pretrain_experiment"
+```
+
+### File Path Validation
+
+All functions automatically validate that:
+- File paths are provided when required
+- Files exist and are accessible
+- Dataset parameters match expected simulation parameters
+- Metadata is consistent across training and evaluation
+
+### Migration from Environment Variables
+
+If you previously used environment variables `BURGERS_TRAIN_FILE_PATH` and `BURGERS_TEST_FILE_PATH`, you now need to:
+
+1. **Update your scripts** to include explicit `--train_file_path` and `--test_file_path` arguments
+2. **Remove .env dependencies** - file paths are no longer read from environment variables
+3. **Use absolute paths** or paths relative to your working directory
+
+**Example migration:**
+```bash
+# Old approach (no longer supported)
+export BURGERS_TRAIN_FILE_PATH="/data/burgers_train"
+python -m burgers_control.eval_on_testset
+
+# New approach (required)
+python -m burgers_control.eval_on_testset \
+    --train_file_path "/data/burgers_train"
+```

@@ -32,9 +32,6 @@ except ImportError:
 setup_logging(logger_name="burgers_generation")
 log_info, log_warning, log_error = get_logger_functions("burgers_generation")
 
-BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
-BURGERS_TEST_FILE_PATH = os.getenv("BURGERS_TEST_FILE_PATH")
-
 # ===============================
 # Dataset loading utils
 # ===============================
@@ -49,7 +46,19 @@ def discounted_cumsum(x: torch.Tensor, gamma: float) -> torch.Tensor:
         cumsum[t] = x[t] + gamma * cumsum[t + 1]
     return cumsum
 
-def get_squence_data(file_path=BURGERS_TRAIN_FILE_PATH):
+def get_squence_data(file_path):
+    """
+    Load training data from the specified file path.
+    
+    Args:
+        file_path: Path to the training dataset file
+        
+    Returns:
+        dict: Data dictionary with observations, actions, rewards, and targets
+    """
+    if file_path is None:
+        raise ValueError("file_path must be provided")
+        
     # Load dataset using Hugging Face datasets
     try:
         dataset = load_from_disk(file_path)
@@ -86,7 +95,7 @@ def get_squence_data(file_path=BURGERS_TRAIN_FILE_PATH):
     )
     return data
 
-def get_training_data_with_metadata(file_path=BURGERS_TRAIN_FILE_PATH):
+def get_training_data_with_metadata(file_path):
     """
     Load training dataset with metadata extraction.
     
@@ -96,6 +105,9 @@ def get_training_data_with_metadata(file_path=BURGERS_TRAIN_FILE_PATH):
     Returns:
         tuple: (data_dict, metadata_dict)
     """
+    if file_path is None:
+        raise ValueError("file_path must be provided")
+        
     # Load dataset using Hugging Face datasets
     try:
         dataset = load_from_disk(file_path)
@@ -148,7 +160,19 @@ def get_training_data_with_metadata(file_path=BURGERS_TRAIN_FILE_PATH):
     )
     return data, metadata
 
-def get_test_data(file_path=BURGERS_TEST_FILE_PATH):
+def get_test_data(file_path):
+    """
+    Load test data from the specified file path.
+    
+    Args:
+        file_path: Path to the test dataset file
+        
+    Returns:
+        dict: Data dictionary with observations, actions, rewards, and targets
+    """
+    if file_path is None:
+        raise ValueError("file_path must be provided")
+        
     # Load dataset using Hugging Face datasets
     try:
         dataset = load_from_disk(file_path)
@@ -176,7 +200,7 @@ def get_test_data(file_path=BURGERS_TEST_FILE_PATH):
     )
     return data
 
-def get_test_data_with_metadata(file_path=BURGERS_TEST_FILE_PATH):
+def get_test_data_with_metadata(file_path):
     """
     Load test dataset with metadata extraction.
     
@@ -186,6 +210,9 @@ def get_test_data_with_metadata(file_path=BURGERS_TEST_FILE_PATH):
     Returns:
         tuple: (data_dict, metadata_dict)
     """
+    if file_path is None:
+        raise ValueError("file_path must be provided")
+        
     # Load dataset using Hugging Face datasets
     try:
         dataset = load_from_disk(file_path)
@@ -235,12 +262,24 @@ def get_test_data_with_metadata(file_path=BURGERS_TEST_FILE_PATH):
     return data, metadata
 
 class BurgersDataset(torch.utils.data.Dataset):
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, train_file_path=None, test_file_path=None):
+        """
+        Initialize BurgersDataset.
+        
+        Args:
+            mode: Either "train" or "test"
+            train_file_path: Path to training dataset file (required if mode="train")
+            test_file_path: Path to test dataset file (required if mode="test")
+        """
         assert mode in ["train", "test"]
         if mode == "train":
-            self.data = get_squence_data(BURGERS_TRAIN_FILE_PATH)
+            if train_file_path is None:
+                raise ValueError("train_file_path must be provided when mode='train'")
+            self.data = get_squence_data(train_file_path)
         elif mode == "test":
-            self.data = get_test_data(BURGERS_TEST_FILE_PATH)
+            if test_file_path is None:
+                raise ValueError("test_file_path must be provided when mode='test'")
+            self.data = get_test_data(test_file_path)
         else:
             raise ValueError(f"Invalid mode: {mode}")
         
@@ -1117,8 +1156,7 @@ if __name__ == "__main__":
     
     if args.mode == "test":
         # Run the original test
-        log_file_path = args.log_file or f"burgers_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        logger, actual_log_path = setup_logging(log_file_path, logger_name="burgers_generation", mode="test")
+        logger, actual_log_path = setup_logging(logger_name="burgers_generation", mode="test")
         
         log_info("Running simulation validation test...")
         # Set seed for test reproducibility
@@ -1151,22 +1189,15 @@ if __name__ == "__main__":
             log_info("TESTING GENERATED DATA WITH ENVIRONMENT CHECK")
             log_info("="*50)
             
-            # Temporarily update the paths
-            original_train_path = BURGERS_TRAIN_FILE_PATH
-            original_test_path = BURGERS_TEST_FILE_PATH
-            
-            # Update global variables
-            globals()['BURGERS_TRAIN_FILE_PATH'] = train_file
-            globals()['BURGERS_TEST_FILE_PATH'] = test_file
-            
             try:
                 # Test with our environment check (need to import here to avoid circular imports)
                 sys.path.append('.')
-                from eval_on_testset import test_environment_with_training_data
+                from burgers_control.eval_on_testset import test_environment_with_training_data
                 
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 
                 mean_mse, all_mse_values = test_environment_with_training_data(
+                    train_file_path=train_file,
                     device=device,
                     num_trajectories=5,  # Test with 5 trajectories
                     num_time_points=10,
@@ -1183,10 +1214,6 @@ if __name__ == "__main__":
                     
             except ImportError:
                 log_info("Note: eval_on_testset.py not found, skipping validation")
-            finally:
-                # Restore original paths
-                globals()['BURGERS_TRAIN_FILE_PATH'] = original_train_path
-                globals()['BURGERS_TEST_FILE_PATH'] = original_test_path
                 
     elif args.mode == "full":
         # Generate full production dataset

@@ -37,8 +37,6 @@ from burgers_control.burgers import (
 )
 from burgers_control.utils.utils import setup_logging, get_logger_functions
 
-BURGERS_TEST_FILE_PATH = os.getenv("BURGERS_TEST_FILE_PATH")
-BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
 
 setup_logging(logger_name="eval_on_testset")
 log_info, log_warning, log_error = get_logger_functions("eval_on_testset")
@@ -81,7 +79,7 @@ def setup_simulation_matrices(spatial_size, viscosity, device):
     
     return transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step
 
-def test_agent_on_dataset(agent, agent_metadata, device, num_trajectories=50, mode="final_state"):
+def test_agent_on_dataset(agent, agent_metadata, device, test_file_path, num_trajectories=50, mode="final_state"):
     """
     Test agent on pre-generated test dataset using one-step simulation.
     Environment parameters are extracted from agent metadata and validated against test dataset.
@@ -90,6 +88,7 @@ def test_agent_on_dataset(agent, agent_metadata, device, num_trajectories=50, mo
         agent: Trained PPO agent
         agent_metadata: Metadata from saved agent containing training parameters
         device: Device for computation
+        test_file_path: Path to the test dataset file
         num_trajectories: Number of test trajectories to evaluate
         mode: Target mode for goal-conditioned agent
             - "final_state": Use final target state as goal for all time steps (default)
@@ -120,7 +119,7 @@ def test_agent_on_dataset(agent, agent_metadata, device, num_trajectories=50, mo
         log_info(f"  {param}: {value}")
     
     # Load test data and extract its metadata
-    test_data, test_metadata = get_test_data_with_metadata(BURGERS_TEST_FILE_PATH)
+    test_data, test_metadata = get_test_data_with_metadata(test_file_path)
     
     log_info("="*50)  
     log_info("TEST DATASET PARAMETERS")
@@ -301,13 +300,14 @@ def test_agent_on_dataset(agent, agent_metadata, device, num_trajectories=50, mo
     
     return mean_mse, all_mse_values
 
-def test_environment_with_training_data(device, num_trajectories=50):
+def test_environment_with_training_data(train_file_path, device, num_trajectories=50):
     """
     Test environment simulation using actions from training dataset.
     Environment parameters are extracted from the dataset metadata.
     This serves as a sanity check for the environment implementation.
     
     Args:
+        train_file_path: Path to the training dataset file
         device: Device for computation  
         num_trajectories: Number of training trajectories to test
         
@@ -315,7 +315,7 @@ def test_environment_with_training_data(device, num_trajectories=50):
         tuple: (mean_mse, all_mse_values)
     """
     # Load training data with metadata
-    train_data, train_metadata = get_training_data_with_metadata(BURGERS_TRAIN_FILE_PATH)
+    train_data, train_metadata = get_training_data_with_metadata(train_file_path)
     
     # Extract environment parameters from dataset metadata
     num_time_points = train_metadata.get('num_time_points', 10)
@@ -585,6 +585,10 @@ def main():
     parser = argparse.ArgumentParser(description="Test a saved PPO agent on pre-generated test dataset")
     parser.add_argument("--checkpoint_path", type=str, required=False,
                        help="Path to the saved agent checkpoint")
+    parser.add_argument("--train_file_path", type=str, required=False,
+                       help="Path to the training dataset file (required for environment check mode)")
+    parser.add_argument("--test_file_path", type=str, required=False,
+                       help="Path to the test dataset file (required for agent evaluation mode)")
     parser.add_argument("--device", type=str, default="auto", 
                        help="Device to run on (cuda:0, cpu, or auto)")
     parser.add_argument("--num_trajectories", type=int, default=50,
@@ -605,6 +609,9 @@ def main():
     
     # Load the saved agent
     if args.checkpoint_path:
+        if not args.test_file_path:
+            raise ValueError("--test_file_path is required when using --checkpoint_path for agent evaluation")
+            
         log_info(f"Loading agent from: {args.checkpoint_path}")
         agent, metadata = load_saved_agent(args.checkpoint_path, device=device)
         
@@ -635,6 +642,7 @@ def main():
             agent=agent,
             agent_metadata=metadata,
             device=device,
+            test_file_path=args.test_file_path,
             num_trajectories=args.num_trajectories,
             mode=args.mode
         )
@@ -649,11 +657,15 @@ def main():
         
     else:
         # Environment check mode - use training data with provided actions
+        if not args.train_file_path:
+            raise ValueError("--train_file_path is required when running environment check mode (no --checkpoint_path provided)")
+            
         log_info("No checkpoint path provided. Running environment check mode.")
         log_info("This will test the environment simulation using training data actions.")
         log_info("Environment parameters will be automatically extracted from dataset metadata.")
         
         mean_mse, all_mse_values = test_environment_with_training_data(
+            train_file_path=args.train_file_path,
             device=device,
             num_trajectories=args.num_trajectories
         )
