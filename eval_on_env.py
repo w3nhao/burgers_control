@@ -11,6 +11,11 @@ import torch
 import numpy as np
 from ppo import load_saved_agent
 from burgers_onthefly_env import BurgersOnTheFlyVecEnv
+from utils.utils import setup_logging, get_logger_functions
+
+# Setup logger with the new elegant pattern
+setup_logging(logger_name="eval_on_env")
+log_info, log_warning, log_error = get_logger_functions("eval_on_env")
 
 def main():
     parser = argparse.ArgumentParser(description="Load and test a saved PPO agent")
@@ -29,30 +34,30 @@ def main():
     else:
         device = torch.device(args.device)
     
-    print(f"Using device: {device}")
+    log_info(f"Using device: {device}")
     
     # Load the saved agent
-    print(f"Loading agent from: {args.checkpoint_path}")
+    log_info(f"Loading agent from: {args.checkpoint_path}")
     agent, metadata = load_saved_agent(args.checkpoint_path, device=device)
     
     # Print some info about the loaded agent
-    print("\n" + "="*50)
-    print("LOADED AGENT INFO")
-    print("="*50)
-    print(f"Training iteration: {metadata.get('iteration', 'unknown')}")
-    print(f"Global step: {metadata.get('global_step', 'unknown')}")
-    print(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
-    print(f"Version: {metadata.get('version', 'unknown')}")
-    print(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
+    log_info("=" * 50)
+    log_info("LOADED AGENT INFO")
+    log_info("=" * 50)
+    log_info(f"Training iteration: {metadata.get('iteration', 'unknown')}")
+    log_info(f"Global step: {metadata.get('global_step', 'unknown')}")
+    log_info(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
+    log_info(f"Version: {metadata.get('version', 'unknown')}")
+    log_info(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
     
     # Get environment parameters from saved args
     saved_args = metadata.get('args', {})
     if saved_args:
-        print("\nEnvironment configuration:")
-        print(f"  Spatial size: {saved_args.get('spatial_size', 128)}")
-        print(f"  Num time points: {saved_args.get('num_time_points', 10)}")
-        print(f"  Viscosity: {saved_args.get('viscosity', 0.01)}")
-        print(f"  Reward type: {saved_args.get('reward_type', 'exp_scaled_mse')}")
+        log_info("Environment configuration:")
+        log_info(f"  Spatial size: {saved_args.get('spatial_size', 128)}")
+        log_info(f"  Num time points: {saved_args.get('num_time_points', 10)}")
+        log_info(f"  Viscosity: {saved_args.get('viscosity', 0.01)}")
+        log_info(f"  Reward type: {saved_args.get('reward_type', 'exp_scaled_mse')}")
     
     # Create environment with same parameters as training
     env = BurgersOnTheFlyVecEnv(
@@ -68,9 +73,9 @@ def main():
     )
     env.set_device(device)
     
-    print(f"\n" + "="*50)
-    print("TESTING AGENT")
-    print("="*50)
+    log_info("=" * 50)
+    log_info("TESTING AGENT")
+    log_info("=" * 50)
     
     # Test the agent
     agent.eval()  # Set to evaluation mode
@@ -101,15 +106,15 @@ def main():
             step += 1
         
         episode_returns.append(episode_return)
-        print(f"Episode {episode + 1}: Return = {episode_return:.4f}, Steps = {step}")
+        log_info(f"Episode {episode + 1}: Return = {episode_return:.4f}, Steps = {step}")
     
-    print(f"\n" + "="*50)
-    print("RESULTS")
-    print("="*50)
-    print(f"Average return over {args.num_episodes} episodes: {np.mean(episode_returns):.4f}")
-    print(f"Standard deviation: {np.std(episode_returns):.4f}")
-    print(f"Best episode return: {np.max(episode_returns):.4f}")
-    print(f"Worst episode return: {np.min(episode_returns):.4f}")
+    log_info("=" * 50)
+    log_info("RESULTS")
+    log_info("=" * 50)
+    log_info(f"Average return over {args.num_episodes} episodes: {np.mean(episode_returns):.4f}")
+    log_info(f"Standard deviation: {np.std(episode_returns):.4f}")
+    log_info(f"Best episode return: {np.max(episode_returns):.4f}")
+    log_info(f"Worst episode return: {np.min(episode_returns):.4f}")
     
     env.close()
 

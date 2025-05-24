@@ -27,6 +27,10 @@ from burgers import (
     BURGERS_TRAIN_FILE_PATH,
     burgers_solver
 )
+from utils.utils import setup_logging, get_logger_functions
+
+setup_logging(logger_name="eval_on_testset")
+log_info, log_warning, log_error = get_logger_functions("eval_on_testset")
 
 def setup_simulation_matrices(spatial_size, viscosity, device):
     """
@@ -91,10 +95,10 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     target_states = test_data['targets'][:num_trajectories, :]           # Shape: (N, spatial_size)
     
     spatial_size = initial_states.shape[1]
-    print(f"Testing on {num_trajectories} trajectories")
-    print(f"Initial states shape: {initial_states.shape}")
-    print(f"Target states shape: {target_states.shape}")
-    print(f"Spatial size: {spatial_size}")
+    log_info(f"Testing on {num_trajectories} trajectories")
+    log_info(f"Initial states shape: {initial_states.shape}")
+    log_info(f"Target states shape: {target_states.shape}")
+    log_info(f"Spatial size: {spatial_size}")
     
     # Setup simulation matrices
     transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step = \
@@ -114,9 +118,9 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     all_final_states = []
     all_mse_values = []
     
-    print(f"\n" + "="*50)
-    print("RUNNING AGENT EVALUATION")
-    print("="*50)
+    log_info("="*50)
+    log_info("RUNNING AGENT EVALUATION")
+    log_info("="*50)
     
     for traj_idx in range(num_trajectories):
         # Get initial state for this trajectory
@@ -155,7 +159,7 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
         
         # Show progress - more frequent for small numbers of trajectories
         if num_trajectories <= 10 or (traj_idx + 1) % 10 == 0:
-            print(f"Completed trajectory {traj_idx + 1}/{num_trajectories}, MSE: {mse:.6f}")
+            log_info(f"Completed trajectory {traj_idx + 1}/{num_trajectories}, MSE: {mse:.6f}")
     
     # Calculate overall statistics
     mean_mse = np.mean(all_mse_values)
@@ -163,13 +167,13 @@ def test_agent_on_dataset(agent, device, num_trajectories=50, num_time_points=10
     min_mse = np.min(all_mse_values)
     max_mse = np.max(all_mse_values)
     
-    print(f"\n" + "="*50)
-    print("FINAL RESULTS")
-    print("="*50)
-    print(f"J_mean_mse (Mean MSE over {num_trajectories} trajectories): {mean_mse:.6f}")
-    print(f"Standard deviation: {std_mse:.6f}")
-    print(f"Minimum MSE: {min_mse:.6f}")
-    print(f"Maximum MSE: {max_mse:.6f}")
+    log_info("="*50)
+    log_info("FINAL RESULTS")
+    log_info("="*50)
+    log_info(f"J_mean_mse (Mean MSE over {num_trajectories} trajectories): {mean_mse:.6f}")
+    log_info(f"Standard deviation: {std_mse:.6f}")
+    log_info(f"Minimum MSE: {min_mse:.6f}")
+    log_info(f"Maximum MSE: {max_mse:.6f}")
     
     return mean_mse, all_mse_values
 
@@ -202,18 +206,18 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
     initial_states = observations[:, 0, :]  # Shape: (N, spatial_size)
     
     spatial_size = initial_states.shape[1]
-    print(f"Testing environment on {num_trajectories} training trajectories")
-    print(f"Initial states shape: {initial_states.shape}")
-    print(f"Actions shape: {actions.shape}")
-    print(f"Target states shape: {targets.shape}")
-    print(f"Spatial size: {spatial_size}")
+    log_info(f"Testing environment on {num_trajectories} training trajectories")
+    log_info(f"Initial states shape: {initial_states.shape}")
+    log_info(f"Actions shape: {actions.shape}")
+    log_info(f"Target states shape: {targets.shape}")
+    log_info(f"Spatial size: {spatial_size}")
     
     # Debug: Print simulation parameters
-    print(f"\nSimulation parameters:")
-    print(f"  - Viscosity: {viscosity}")
-    print(f"  - Simulation time: {sim_time}")
-    print(f"  - Time step: {time_step}")
-    print(f"  - Number of time points: {num_time_points}")
+    log_info("Simulation parameters:")
+    log_info(f"  - Viscosity: {viscosity}")
+    log_info(f"  - Simulation time: {sim_time}")
+    log_info(f"  - Time step: {time_step}")
+    log_info(f"  - Number of time points: {num_time_points}")
     
     # Setup simulation matrices
     transport_indices, transport_coeffs, diffusion_indices, diffusion_coeffs, spatial_step = \
@@ -223,10 +227,10 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
     total_steps = math.ceil(sim_time / time_step)
     record_interval = math.floor(total_steps / num_time_points)
     
-    print(f"  - Total simulation steps: {total_steps}")
-    print(f"  - Record interval: {record_interval}")
-    print(f"  - Actual steps per time point: {record_interval}")
-    print(f"  - Spatial step: {spatial_step:.6f}")
+    log_info(f"  - Total simulation steps: {total_steps}")
+    log_info(f"  - Record interval: {record_interval}")
+    log_info(f"  - Actual steps per time point: {record_interval}")
+    log_info(f"  - Spatial step: {spatial_step:.6f}")
     
     # Convert to tensors and move to device
     initial_states = torch.tensor(initial_states, device=device, dtype=torch.float32)
@@ -237,34 +241,34 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
     all_mse_values = []
     all_original_mse_values = []
     
-    print(f"\n" + "="*50)
-    print("RUNNING ENVIRONMENT CHECK")
-    print("="*50)
+    log_info("="*50)
+    log_info("RUNNING ENVIRONMENT CHECK")
+    log_info("="*50)
     
     # Test first trajectory with detailed debugging
     for traj_idx in range(min(1, num_trajectories)):  # Debug first trajectory only
-        print(f"\n--- Debugging trajectory {traj_idx} ---")
+        log_info(f"--- Debugging trajectory {traj_idx} ---")
         
         # Get initial state and actions for this trajectory
         current_state = initial_states[traj_idx:traj_idx+1]  # Shape: (1, spatial_size)
         traj_actions = actions[traj_idx]                      # Shape: (T, spatial_size)
         target_state = targets[traj_idx:traj_idx+1]          # Shape: (1, spatial_size)
         
-        print(f"Initial state stats: mean={current_state.mean().item():.6f}, std={current_state.std().item():.6f}")
-        print(f"Target state stats: mean={target_state.mean().item():.6f}, std={target_state.std().item():.6f}")
+        log_info(f"Initial state stats: mean={current_state.mean().item():.6f}, std={current_state.std().item():.6f}")
+        log_info(f"Target state stats: mean={target_state.mean().item():.6f}, std={target_state.std().item():.6f}")
         
         # COMPARISON 1: Use original burgers_solver
-        print(f"\n=== Testing original burgers_solver ===")
+        log_info("=== Testing original burgers_solver ===")
         traj_actions_expanded = traj_actions.unsqueeze(0)  # Add batch dimension: (1, T, spatial_size)
         original_trajectory = burgers_solver(current_state, traj_actions_expanded, num_time_points=num_time_points)
         original_final_state = original_trajectory[:, -1, :]  # Shape: (1, spatial_size)
         original_mse = ((original_final_state - target_state) ** 2).mean().item()
         
-        print(f"Original solver final state stats: mean={original_final_state.mean().item():.6f}, std={original_final_state.std().item():.6f}")
-        print(f"Original solver MSE: {original_mse:.10f}")
+        log_info(f"Original solver final state stats: mean={original_final_state.mean().item():.6f}, std={original_final_state.std().item():.6f}")
+        log_info(f"Original solver MSE: {original_mse:.10f}")
         
         # COMPARISON 2: Use our step-by-step implementation
-        print(f"\n=== Testing step-by-step implementation ===")
+        log_info("=== Testing step-by-step implementation ===")
         
         # Pad state for boundary conditions
         state = torch.nn.functional.pad(current_state, (1, 1))  # Add boundary padding
@@ -277,7 +281,7 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
             # Get action for this time step
             action = traj_actions[time_idx:time_idx+1]  # Shape: (1, spatial_size)
             
-            print(f"Time {time_idx}: action stats: mean={action.mean().item():.6f}, std={action.std().item():.6f}")
+            log_info(f"Time {time_idx}: action stats: mean={action.mean().item():.6f}, std={action.std().item():.6f}")
             
             # Pad action for simulation  
             action_padded = torch.nn.functional.pad(action, (1, 1))
@@ -292,7 +296,7 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
             # Store intermediate state (remove padding)
             intermediate_state = state[..., 1:-1]
             intermediate_states.append(intermediate_state.clone())
-            print(f"  After simulation: state stats: mean={intermediate_state.mean().item():.6f}, std={intermediate_state.std().item():.6f}")
+            log_info(f"  After simulation: state stats: mean={intermediate_state.mean().item():.6f}, std={intermediate_state.std().item():.6f}")
         
         # Get final state (remove padding)
         final_state = state[..., 1:-1]
@@ -301,14 +305,14 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
         mse = ((final_state - target_state) ** 2).mean().item()
         max_abs_diff = (final_state - target_state).abs().max().item()
         
-        print(f"\nFinal comparison:")
-        print(f"  - Step-by-step final state stats: mean={final_state.mean().item():.6f}, std={final_state.std().item():.6f}")
-        print(f"  - Step-by-step MSE: {mse:.10f}")
-        print(f"  - Max absolute difference from target: {max_abs_diff:.10f}")
+        log_info("Final comparison:")
+        log_info(f"  - Step-by-step final state stats: mean={final_state.mean().item():.6f}, std={final_state.std().item():.6f}")
+        log_info(f"  - Step-by-step MSE: {mse:.10f}")
+        log_info(f"  - Max absolute difference from target: {max_abs_diff:.10f}")
         
         # Compare the two methods
         method_diff = (final_state - original_final_state).abs().max().item()
-        print(f"  - Max difference between methods: {method_diff:.10f}")
+        log_info(f"  - Max difference between methods: {method_diff:.10f}")
         
         # Store for overall statistics
         all_final_states.append(final_state)
@@ -361,7 +365,7 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
         
         # Show progress - more frequent for small numbers of trajectories
         if num_trajectories <= 10 or (traj_idx + 1) % 10 == 0:
-            print(f"Completed trajectory {traj_idx + 1}/{num_trajectories}, Step-by-step MSE: {mse:.10f}, Original MSE: {original_mse:.10f}")
+            log_info(f"Completed trajectory {traj_idx + 1}/{num_trajectories}, Step-by-step MSE: {mse:.10f}, Original MSE: {original_mse:.10f}")
     
     # Calculate overall statistics
     mean_mse = np.mean(all_mse_values)
@@ -374,63 +378,63 @@ def test_environment_with_training_data(device, num_trajectories=50, num_time_po
     min_original_mse = np.min(all_original_mse_values)
     max_original_mse = np.max(all_original_mse_values)
     
-    print(f"\n" + "="*50)
-    print("ENVIRONMENT CHECK RESULTS")
-    print("="*50)
-    print(f"STEP-BY-STEP IMPLEMENTATION:")
-    print(f"  J_env_check_mse (Mean MSE over {num_trajectories} trajectories): {mean_mse:.10f}")
-    print(f"  Standard deviation: {std_mse:.10f}")
-    print(f"  Minimum MSE: {min_mse:.10f}")
-    print(f"  Maximum MSE: {max_mse:.10f}")
+    log_info("="*50)
+    log_info("ENVIRONMENT CHECK RESULTS")
+    log_info("="*50)
+    log_info("STEP-BY-STEP IMPLEMENTATION:")
+    log_info(f"  J_env_check_mse (Mean MSE over {num_trajectories} trajectories): {mean_mse:.10f}")
+    log_info(f"  Standard deviation: {std_mse:.10f}")
+    log_info(f"  Minimum MSE: {min_mse:.10f}")
+    log_info(f"  Maximum MSE: {max_mse:.10f}")
     
-    print(f"\nORIGINAL BURGERS_SOLVER:")
-    print(f"  J_original_mse (Mean MSE over {num_trajectories} trajectories): {mean_original_mse:.10f}")
-    print(f"  Standard deviation: {std_original_mse:.10f}")
-    print(f"  Minimum MSE: {min_original_mse:.10f}")
-    print(f"  Maximum MSE: {max_original_mse:.10f}")
+    log_info("ORIGINAL BURGERS_SOLVER:")
+    log_info(f"  J_original_mse (Mean MSE over {num_trajectories} trajectories): {mean_original_mse:.10f}")
+    log_info(f"  Standard deviation: {std_original_mse:.10f}")
+    log_info(f"  Minimum MSE: {min_original_mse:.10f}")
+    log_info(f"  Maximum MSE: {max_original_mse:.10f}")
     
     if mean_original_mse < 1e-10:
-        print("\n✓ EXCELLENT: Original solver MSE is extremely low - training data is consistent!")
+        log_info("✓ EXCELLENT: Original solver MSE is extremely low - training data is consistent!")
     elif mean_original_mse < 1e-6:
-        print("\n✓ GOOD: Original solver MSE is very low - training data is mostly consistent.")
+        log_info("✓ GOOD: Original solver MSE is very low - training data is mostly consistent.")
     elif mean_original_mse < 1e-3:
-        print("\n⚠ WARNING: Original solver MSE is moderate - training data may have some inconsistencies.")
+        log_info("⚠ WARNING: Original solver MSE is moderate - training data may have some inconsistencies.")
     else:
-        print("\n❌ TRAINING DATA ISSUE: Original solver MSE is high - training data was generated with different parameters!")
-        print("   This indicates the training data targets don't match the current simulation parameters.")
+        log_info("❌ TRAINING DATA ISSUE: Original solver MSE is high - training data was generated with different parameters!")
+        log_info("   This indicates the training data targets don't match the current simulation parameters.")
     
     # Check if our implementation matches the original solver exactly
     method_differences = [abs(step_mse - orig_mse) for step_mse, orig_mse in zip(all_mse_values, all_original_mse_values)]
     max_method_diff = max(method_differences)
     
     if max_method_diff < 1e-10:
-        print("\n✓ EXCELLENT: Step-by-step implementation is PERFECT - matches original solver exactly!")
-        print("   Max difference between methods across all trajectories: {:.2e}".format(max_method_diff))
+        log_info("✓ EXCELLENT: Step-by-step implementation is PERFECT - matches original solver exactly!")
+        log_info("   Max difference between methods across all trajectories: {:.2e}".format(max_method_diff))
     elif max_method_diff < 1e-6:
-        print("\n✓ GOOD: Step-by-step implementation is very accurate - closely matches original solver.")
-        print("   Max difference between methods: {:.2e}".format(max_method_diff))
+        log_info("✓ GOOD: Step-by-step implementation is very accurate - closely matches original solver.")
+        log_info("   Max difference between methods: {:.2e}".format(max_method_diff))
     else:
-        print("\n❌ IMPLEMENTATION ERROR: Step-by-step implementation differs from original solver.")
-        print("   Max difference between methods: {:.2e}".format(max_method_diff))
+        log_info("❌ IMPLEMENTATION ERROR: Step-by-step implementation differs from original solver.")
+        log_info("   Max difference between methods: {:.2e}".format(max_method_diff))
     
-    print("\n" + "="*70)
-    print("DIAGNOSIS:")
+    log_info("="*70)
+    log_info("DIAGNOSIS:")
     if max_method_diff < 1e-10 and mean_original_mse > 1e-3:
-        print("✓ Environment implementation is CORRECT (perfectly matches reference solver)")
-        print("❌ Training data appears to be generated with different simulation parameters")
-        print("   - Both solvers give identical results")
-        print("   - Neither matches the training targets")
-        print("   - This suggests the training data was created with different:")
-        print("     * Viscosity coefficient")
-        print("     * Time step size") 
-        print("     * Simulation time")
-        print("     * Numerical scheme")
+        log_info("✓ Environment implementation is CORRECT (perfectly matches reference solver)")
+        log_info("❌ Training data appears to be generated with different simulation parameters")
+        log_info("   - Both solvers give identical results")
+        log_info("   - Neither matches the training targets")
+        log_info("   - This suggests the training data was created with different:")
+        log_info("     * Viscosity coefficient")
+        log_info("     * Time step size") 
+        log_info("     * Simulation time")
+        log_info("     * Numerical scheme")
     elif max_method_diff < 1e-10 and mean_original_mse < 1e-6:
-        print("✓ Environment implementation is CORRECT")
-        print("✓ Training data is consistent with current parameters")
+        log_info("✓ Environment implementation is CORRECT")
+        log_info("✓ Training data is consistent with current parameters")
     else:
-        print("❌ Issues detected that need investigation")
-    print("="*70)
+        log_info("❌ Issues detected that need investigation")
+    log_info("="*70)
     
     return mean_mse, all_mse_values
 
@@ -459,22 +463,22 @@ def main():
     else:
         device = torch.device(args.device)
     
-    print(f"Using device: {device}")
+    log_info(f"Using device: {device}")
     
     # Load the saved agent
     if args.checkpoint_path:
-        print(f"Loading agent from: {args.checkpoint_path}")
+        log_info(f"Loading agent from: {args.checkpoint_path}")
         agent, metadata = load_saved_agent(args.checkpoint_path, device=device)
         
         # Print some info about the loaded agent
-        print("\n" + "="*50)
-        print("LOADED AGENT INFO")
-        print("="*50)
-        print(f"Training iteration: {metadata.get('iteration', 'unknown')}")
-        print(f"Global step: {metadata.get('global_step', 'unknown')}")
-        print(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
-        print(f"Version: {metadata.get('version', 'unknown')}")
-        print(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
+        log_info("="*50)
+        log_info("LOADED AGENT INFO")
+        log_info("="*50)
+        log_info(f"Training iteration: {metadata.get('iteration', 'unknown')}")
+        log_info(f"Global step: {metadata.get('global_step', 'unknown')}")
+        log_info(f"Episode return mean: {metadata.get('episode_return_mean', 'unknown')}")
+        log_info(f"Version: {metadata.get('version', 'unknown')}")
+        log_info(f"PyTorch version: {metadata.get('torch_version', 'unknown')}")
         
         # Test the agent on the dataset
         mean_mse, all_mse_values = test_agent_on_dataset(
@@ -487,16 +491,16 @@ def main():
             time_step=args.time_step
         )
         
-        print(f"\n" + "="*50)
-        print("SUMMARY")
-        print("="*50)
-        print(f"Tested agent on {args.num_trajectories} trajectories from test dataset")
-        print(f"Final J_mean_mse: {mean_mse:.6f}")
+        log_info("="*50)
+        log_info("SUMMARY")
+        log_info("="*50)
+        log_info(f"Tested agent on {args.num_trajectories} trajectories from test dataset")
+        log_info(f"Final J_mean_mse: {mean_mse:.6f}")
         
     else:
         # Environment check mode - use training data with provided actions
-        print("No checkpoint path provided. Running environment check mode.")
-        print("This will test the environment simulation using training data actions.")
+        log_info("No checkpoint path provided. Running environment check mode.")
+        log_info("This will test the environment simulation using training data actions.")
         
         mean_mse, all_mse_values = test_environment_with_training_data(
             device=device,
@@ -507,12 +511,12 @@ def main():
             time_step=args.time_step
         )
         
-        print(f"\n" + "="*50)
-        print("SUMMARY")
-        print("="*50)
-        print(f"Environment check completed on {args.num_trajectories} trajectories from training dataset")
-        print(f"Final J_env_check_mse: {mean_mse:.10f}")
-        print("Low MSE indicates accurate environment implementation.")
+        log_info("="*50)
+        log_info("SUMMARY")
+        log_info("="*50)
+        log_info(f"Environment check completed on {args.num_trajectories} trajectories from training dataset")
+        log_info(f"Final J_env_check_mse: {mean_mse:.10f}")
+        log_info("Low MSE indicates accurate environment implementation.")
 
 if __name__ == "__main__":
     main() 

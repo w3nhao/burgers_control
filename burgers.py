@@ -13,6 +13,7 @@ import random
 import logging
 import sys
 from datetime import datetime
+from utils.utils import setup_logging, get_logger_functions
 
 try:
     import h5py
@@ -20,6 +21,9 @@ except ImportError:
     print("You are not using h5py as we are not going to support h5py in the future.")
     pass
 
+# Setup logger with the new elegant pattern
+setup_logging(logger_name="burgers_generation")
+log_info, log_warning, log_error = get_logger_functions("burgers_generation")
 
 BURGERS_TRAIN_FILE_PATH = os.getenv("BURGERS_TRAIN_FILE_PATH")
 BURGERS_TEST_FILE_PATH = os.getenv("BURGERS_TEST_FILE_PATH")
@@ -159,7 +163,7 @@ def create_differential_matrices_1d(grid_size):
     return first_deriv, second_deriv
 
 def simulate_burgers_equation(initial_conditions, forcing_terms, viscosity, sim_time, 
-                             time_step=1e-4, num_time_points=10, print_progress=False):
+                             time_step=1e-4, num_time_points=10, print_progress=True):
     """
     Simulates Burgers' equation with forcing terms.
     
@@ -413,7 +417,7 @@ def make_initial_conditions_and_varying_forcing_terms(num_initial_conditions, nu
 
 def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_size=128,
                           viscosity=0.01, sim_time=0.1, time_step=1e-4, seed=None, 
-                          train_file_path=None):
+                          train_file_path=None, print_progress=False, batch_size=1000):
     """
     Generate training data with initial conditions, intermediate states, and actions.
     
@@ -426,6 +430,8 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
         time_step: Time step for simulation
         seed: Random seed for reproducibility
         train_file_path: Path to save the training data
+        print_progress: Whether to show progress bars
+        batch_size: Number of trajectories to process at a time
         
     Returns:
         tuple: (u_data, f_data) where
@@ -455,10 +461,9 @@ def generate_training_data(num_trajectories=100000, num_time_points=10, spatial_
     log_info(f"Forcing terms shape: {forcing_terms.shape}")
     
     # Run simulations in batches to manage memory
-    batch_size = 1000  # Process 1000 trajectories at a time
     all_trajectories = []
     
-    for batch_start in tqdm(range(0, num_trajectories, batch_size), desc="Simulating batches"):
+    for batch_start in tqdm(range(0, num_trajectories, batch_size), desc="Simulating batches", disable=not print_progress):
         batch_end = min(batch_start + batch_size, num_trajectories)
         
         batch_initial = initial_conditions[batch_start:batch_end]
@@ -510,7 +515,7 @@ def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128
     Returns:
         torch.Tensor: Test trajectories (N, T+1, spatial_size) containing full trajectories
     """
-    log_info(f"\nGenerating {num_trajectories} test trajectories...")
+    log_info(f"Generating {num_trajectories} test trajectories...")
     if seed is not None:
         log_info(f"Random seed: {seed}")
     if test_file_path is not None:
@@ -548,7 +553,7 @@ def generate_test_data(num_trajectories=50, num_time_points=10, spatial_size=128
 
 def save_training_data_hf(u_data, f_data, file_path):
     """Save training data using Hugging Face datasets."""
-    log_info(f"\nSaving training data to {file_path}")
+    log_info(f"Saving training data to {file_path}")
     
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -579,7 +584,7 @@ def save_training_data_hf(u_data, f_data, file_path):
 
 def save_test_data_hf(test_data, file_path):
     """Save test data using Hugging Face datasets."""
-    log_info(f"\nSaving test data to {file_path}")
+    log_info(f"Saving test data to {file_path}")
     
     # Create directory if it doesn't exist
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -612,7 +617,7 @@ def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_
     # Setup logging
     if log_file_path is None:
         log_file_path = f"burgers_small_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logger, actual_log_path = setup_logging(log_file_path, "small_dataset")
+    logger, actual_log_path = setup_logging(log_file_path, logger_name="burgers_generation", mode="small_dataset")
     
     # Set random seeds for reproducibility
     set_random_seeds(seed)
@@ -667,7 +672,7 @@ def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_
         test_file_path=test_file_path
     )
     
-    log_info("\n" + "="*50)
+    log_info("="*50)
     log_info("SMALL DATASET GENERATION COMPLETE")
     log_info("="*50)
     log_info(f"Training data shape: {u_data.shape}")
@@ -681,12 +686,11 @@ def generate_small_dataset_for_testing(seed=42, train_file_path=None, test_file_
     return train_file_path, test_file_path, actual_log_path
 
 def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
-                         log_file_path=None):
+                         log_file_path=None, batch_size=1000):
     """Generate the full production dataset."""
     # Setup logging
-    if log_file_path is None:
-        log_file_path = f"burgers_full_dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logger, actual_log_path = setup_logging(log_file_path, "full_dataset")
+    logger, actual_log_path = setup_logging(log_file_path, logger_name="burgers_generation", mode="full_dataset")
+    log_info, log_warning, log_error = get_logger_functions("burgers_generation")
     
     # Set random seeds for reproducibility
     set_random_seeds(seed)
@@ -732,7 +736,9 @@ def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
         sim_time=sim_time,
         time_step=time_step,
         seed=seed,
-        train_file_path=train_file_path
+        train_file_path=train_file_path,
+        print_progress=True,
+        batch_size=batch_size
     )
     
     # Generate test data
@@ -747,13 +753,13 @@ def generate_full_dataset(seed=42, train_file_path=None, test_file_path=None,
         test_file_path=test_file_path
     )
     
-    log_info("\n" + "="*60)
+    log_info("="*60)
     log_info("DATA GENERATION COMPLETE")
     log_info("="*60)
     log_info(f"New training data saved to: {train_file_path}")
     log_info(f"New test data saved to: {test_file_path}")
     log_info(f"Generation log saved to: {actual_log_path}")
-    log_info("\n" + "="*50)
+    log_info("="*50)
     log_info("NEXT STEPS")
     log_info("="*50)
     log_info("1. The dataset paths in burgers.py are already updated to use the new data")
@@ -895,58 +901,6 @@ def test_one_time_point_simulation(seed=42):
 
 
 # ===============================
-# Logging utils
-# ===============================
-
-def setup_logging(log_file_path=None, mode="generation"):
-    """
-    Set up logging to capture all output to both console and file.
-    
-    Args:
-        log_file_path (str): Path to save the log file
-        mode (str): Mode description for log file naming
-    """
-    if log_file_path is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file_path = f"burgers_{mode}_{timestamp}.log"
-    
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(log_file_path) if os.path.dirname(log_file_path) else ".", exist_ok=True)
-    
-    # Create logger
-    logger = logging.getLogger('burgers_generation')
-    logger.setLevel(logging.INFO)
-    
-    # Clear existing handlers
-    logger.handlers.clear()
-    
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # File handler
-    file_handler = logging.FileHandler(log_file_path)
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    
-    logger.info(f"Logging initialized. Log file: {log_file_path}")
-    return logger, log_file_path
-
-def log_info(message):
-    """Helper function to log info messages."""
-    logger = logging.getLogger('burgers_generation')
-    if logger.hasHandlers():
-        logger.info(message)
-    else:
-        print(message)
-        
-# ===============================
 # Random seed utils
 # ===============================
 
@@ -985,6 +939,8 @@ if __name__ == "__main__":
                        help="Path to save training data (default: auto-generated)")
     parser.add_argument("--test_file", type=str, default=None,
                        help="Path to save test data (default: auto-generated)")
+    parser.add_argument("--batch_size", type=int, default=8192,
+                       help="Number of trajectories to process at a time (default: 8192)")
     parser.add_argument("--log_file", type=str, default=None,
                        help="Path to save generation log (default: auto-generated)")
     
@@ -993,7 +949,7 @@ if __name__ == "__main__":
     if args.mode == "test":
         # Run the original test
         log_file_path = args.log_file or f"burgers_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        logger, actual_log_path = setup_logging(log_file_path, "test")
+        logger, actual_log_path = setup_logging(log_file_path, logger_name="burgers_generation", mode="test")
         
         log_info("Running simulation validation test...")
         # Set seed for test reproducibility
@@ -1012,7 +968,7 @@ if __name__ == "__main__":
         
         if args.validate:
             # Test with environment check
-            log_info("\n" + "="*50)
+            log_info("="*50)
             log_info("TESTING GENERATED DATA WITH ENVIRONMENT CHECK")
             log_info("="*50)
             
@@ -1040,7 +996,7 @@ if __name__ == "__main__":
                     time_step=1e-4
                 )
                 
-                log_info(f"\nEnvironment check result: Mean MSE = {mean_mse:.10f}")
+                log_info(f"Environment check result: Mean MSE = {mean_mse:.10f}")
                 if mean_mse < 1e-10:
                     log_info("✓ SUCCESS: Generated data is perfectly consistent!")
                 else:
@@ -1059,7 +1015,8 @@ if __name__ == "__main__":
             seed=args.seed,
             train_file_path=args.train_file,
             test_file_path=args.test_file,
-            log_file_path=args.log_file
+            log_file_path=args.log_file,
+            batch_size=args.batch_size
         )
         
-    log_info("\nDone!")
+    log_info("Done!")
