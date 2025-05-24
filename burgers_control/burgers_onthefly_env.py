@@ -224,6 +224,7 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             trajectories = simulate_burgers_equation(
                 initial_conditions, forcing_terms, self.viscosity, self.sim_time,
                 time_step=self.time_step, num_time_points=self.num_time_points,
+                print_progress=False
             )
             
             # Extract target states (final state of simulation)
