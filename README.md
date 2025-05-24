@@ -70,19 +70,27 @@ print("Available environments:", list_registered_environments())
 ```python
 from burgers_control import make_burgers_vec_env, get_environment_kwargs
 
-# Method 1: Use preset configurations
-kwargs = get_environment_kwargs("BurgersVec-v1")  # Get preset parameters
+# Method 1: Use preset configurations (recommended for fast training)
+kwargs = get_environment_kwargs("BurgersVec-v4")  # Ultra-fast with random targets
 vec_env = make_burgers_vec_env(
     num_envs=8192,     # Thousands of parallel environments
-    **kwargs           # Apply preset: spatial_size=128, sim_time=0.1, etc.
+    **kwargs           # Apply preset: spatial_size=128, sim_time=0.1, use_random_targets=True
 )
 
-# Method 2: Create custom configuration
+# Method 2: Use physics-accurate configuration for final evaluation
+kwargs = get_environment_kwargs("BurgersVec-v1")  # Fast but physics-accurate
 vec_env = make_burgers_vec_env(
-    num_envs=8192,     # Thousands of parallel environments
-    spatial_size=128,   # Spatial resolution
-    num_time_points=10, # Episode length
-    sim_time=1.0,      # Physical simulation time
+    num_envs=1024,     # Fewer envs due to slower resets
+    **kwargs           # Apply preset: use_random_targets=False
+)
+
+# Method 3: Create custom configuration
+vec_env = make_burgers_vec_env(
+    num_envs=8192,          # Thousands of parallel environments
+    spatial_size=128,       # Spatial resolution
+    num_time_points=10,     # Episode length
+    sim_time=1.0,          # Physical simulation time
+    use_random_targets=True, # Enable fast random targets (speedup)
     reward_type="exp_scaled_mse"
 )
 
@@ -94,10 +102,17 @@ obs, rewards, terminated, truncated, info = vec_env.step(actions)
 ### Console Scripts (Recommended)
 
 ```bash
-# Train PPO agent from scratch
+# Train PPO agent with ultra-fast random targets (recommended for development)
+burgers-train \
+    --env_id BurgersVec-v4 \
+    --num_envs 8192 \
+    --total_timesteps 50000000 \
+    --learning_rate 1e-5
+
+# Train with physics-accurate targets (for final production models)
 burgers-train \
     --env_id BurgersVec-v0 \
-    --num_envs 8192 \
+    --num_envs 1024 \
     --total_timesteps 50000000 \
     --learning_rate 1e-5
 
@@ -115,11 +130,26 @@ burgers-eval-env \
 
 ## Available Environments
 
-| Environment ID | Spatial Size | Time Points | Sim Time | Description |
-|---------------|--------------|-------------|----------|-------------|
-| `BurgersVec-v0` | 128 | 10 | 1.0 | Original settings (slower but more dynamics) |
-| `BurgersVec-v1` | 128 | 10 | 0.1 | Faster simulation (10x speedup) |
-| `BurgersVec-debug` | 64 | 5 | 0.1 | Small environment for testing |
+| Environment ID | Spatial Size | Time Points | Sim Time | Random Targets | Description |
+|---------------|--------------|-------------|----------|----------------|-------------|
+| `BurgersVec-v0` | 128 | 10 | 1.0 | ❌ | Original settings (slower but physics-accurate) |
+| `BurgersVec-v1` | 128 | 10 | 0.1 | ❌ | Faster simulation (speedup) |
+| `BurgersVec-v3` | 128 | 10 | 1.0 | ✅ | **Random targets** (More speedup in resets) |
+| `BurgersVec-v4` | 128 | 10 | 0.1 | ✅ | **Ultra-fast** random targets + fast simulation |
+| `BurgersVec-debug` | 64 | 5 | 0.1 | ❌ | Small environment for testing |
+
+### When to Use Each Environment
+
+**Use Random Targets (V3/V4) for:**
+- RL training (Much faster environment resets)
+- Policy pretraining and development
+- Large-scale experiments with many parallel environments
+- Rapid prototyping and testing
+
+**Use Original Targets (V0/V1/V2) for:**
+- Final evaluation and validation
+- Physics-accurate research requiring realistic target distributions
+- Benchmarking against ground truth trajectories
 
 ### Environment Details
 
@@ -130,8 +160,22 @@ from burgers_control import get_environment_kwargs
 params = get_environment_kwargs("BurgersVec-v0")
 print(params)
 # {'spatial_size': 128, 'num_time_points': 10, 'viscosity': 0.01, 
-#  'sim_time': 1.0, 'time_step': 1e-4, 'reward_type': 'exp_scaled_mse', ...}
+#  'sim_time': 1.0, 'time_step': 1e-4, 'reward_type': 'exp_scaled_mse', 
+#  'use_random_targets': False, ...}
+
+# Random targets environment (much faster)
+params_v4 = get_environment_kwargs("BurgersVec-v4") 
+print(params_v4)
+# {'spatial_size': 128, 'num_time_points': 10, 'viscosity': 0.01,
+#  'sim_time': 0.1, 'time_step': 1e-4, 'reward_type': 'exp_scaled_mse',
+#  'use_random_targets': True, ...}  # Key difference!
 ```
+
+**Key Parameters:**
+- `use_random_targets`: When `True`, generates random target states directly instead of running expensive trajectory simulations
+- `sim_time`: Physical simulation time - shorter times mean faster step computations
+- `spatial_size`: Higher values = more detailed spatial resolution but slower computation
+- `reward_type`: `"exp_scaled_mse"` (default), `"vanilla"`, or `"inverse_mse"`
 
 ## Adding Custom Environment Specifications
 
@@ -150,6 +194,7 @@ add_environment_spec(
     num_time_points=20,      # Longer episodes  
     viscosity=0.005,         # Lower viscosity (more turbulent)
     sim_time=0.5,           # Custom simulation time
+    use_random_targets=True, # Enable fast random targets for training
     reward_type="vanilla",   # Different reward function
     mse_scaling_factor=2e3
 )
@@ -209,7 +254,15 @@ register(
 ### 1. Basic PPO Training
 
 ```bash
-# Fast training with V1 environment (recommended for development)
+# Ultra-fast training with V4 environment (recommended for development and most use cases)
+burgers-train \
+    --env_id BurgersVec-v4 \
+    --num_envs 8192 \
+    --total_timesteps 10000000 \
+    --learning_rate 1e-5 \
+    --save_every 100
+
+# Fast training with V1 environment (physics-accurate but slower)
 burgers-train \
     --env_id BurgersVec-v1 \
     --num_envs 4096 \
@@ -217,13 +270,18 @@ burgers-train \
     --learning_rate 1e-5 \
     --save_every 100
 
-# Production training with V0 environment (more complex dynamics)  
+# Production training with V0 environment (full complexity but slowest)  
 burgers-train \
     --env_id BurgersVec-v0 \
-    --num_envs 8192 \
+    --num_envs 1024 \
     --total_timesteps 50000000 \
     --learning_rate 1e-5
 ```
+
+**Recommended Training Strategy:**
+1. **Development**: Use `BurgersVec-v4` for rapid prototyping (faster resets)
+2. **Validation**: Test on `BurgersVec-v1` for physics accuracy
+3. **Final Training**: Optionally fine-tune on `BurgersVec-v0` for maximum realism
 
 ### 2. Training with Policy Pretraining
 
@@ -267,6 +325,8 @@ burgers-train \
     --hidden_dims 1024 1024 1024 \
     --act_fn gelu
 ```
+
+It is highly recommended to tune the `learning_rate`, `ent_coef`, `num_minibatches` and `update_epochs` to get the best performance.
 
 ## Evaluation
 
@@ -353,8 +413,8 @@ python -m burgers_control.burgers \
 ```python
 from burgers_control import make_burgers_vec_env, get_environment_kwargs
 
-# Method 1: Start with a preset and modify
-kwargs = get_environment_kwargs("BurgersVec-v1")  # Get fast preset
+# Method 1: Start with a fast preset and modify
+kwargs = get_environment_kwargs("BurgersVec-v4")  # Get ultra-fast preset
 kwargs.update({
     "spatial_size": 256,      # Higher resolution
     "num_time_points": 20,    # Longer episodes
@@ -362,18 +422,31 @@ kwargs.update({
 })
 custom_env = make_burgers_vec_env(num_envs=1024, **kwargs)
 
-# Method 2: Create entirely custom environment
-custom_env = make_burgers_vec_env(
-    num_envs=1024,
-    spatial_size=256,      # Higher resolution
-    num_time_points=20,    # Longer episodes
-    viscosity=0.005,       # Lower viscosity (more turbulent)
-    sim_time=2.0,          # Longer physical time
+# Method 2: Create entirely custom environment with random targets (fast)
+fast_custom_env = make_burgers_vec_env(
+    num_envs=8192,              # Many parallel environments
+    spatial_size=256,           # Higher resolution
+    num_time_points=20,         # Longer episodes
+    viscosity=0.005,            # Lower viscosity (more turbulent)
+    sim_time=2.0,              # Longer physical time
+    use_random_targets=True,    # Enable fast random targets (speedup)
     reward_type="inverse_mse",  # Different reward function
     mse_scaling_factor=2e3
 )
 
-# Method 3: Register and reuse custom configuration
+# Method 3: Create physics-accurate environment (slower but realistic)
+accurate_custom_env = make_burgers_vec_env(
+    num_envs=512,               # Fewer environments due to slower resets
+    spatial_size=256,           # Higher resolution
+    num_time_points=20,         # Longer episodes
+    viscosity=0.005,            # Lower viscosity (more turbulent)
+    sim_time=2.0,              # Longer physical time
+    use_random_targets=False,   # Physics-accurate targets (slow but realistic)
+    reward_type="inverse_mse",  # Different reward function
+    mse_scaling_factor=2e3
+)
+
+# Method 4: Register and reuse custom configuration
 from burgers_control import add_environment_spec
 add_environment_spec(
     "BurgersVec-mytask",
@@ -381,6 +454,7 @@ add_environment_spec(
     num_time_points=20,
     viscosity=0.005,
     sim_time=2.0,
+    use_random_targets=True,    # Fast for training
     reward_type="inverse_mse"
 )
 
@@ -501,16 +575,9 @@ burgers-eval \
 ### Common Issues
 
 1. **Import errors**: Ensure installed with `pip install -e .`
-2. **Slow training**: Use `BurgersVec-v1` for faster simulation or enable compilation with `--compile`
+2. **Slow training**: Use `BurgersVec-v4` for faster simulation or enable compilation with `--compile`
 3. **Memory issues**: Reduce `num_envs` or use smaller environments (`BurgersVec-debug`)
 4. **Environment not found**: Check `burgers_control.list_registered_environments()`
-
-### Performance Tips
-
-- Use `BurgersVec-v1` for development (10x faster than v0)
-- Enable compilation: `--compile` flag
-- Use CUDA if available: `--cuda 0`
-- Tune batch sizes: `--num_envs`, `--num_minibatches`
 
 ## Citation
 

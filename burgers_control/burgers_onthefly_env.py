@@ -13,6 +13,48 @@ from burgers_control.burgers import (
     simulate_burgers_equation_accelerated as simulate_burgers_equation
 )
 
+def generate_random_states(num_states: int, spatial_size: int, seed: Optional[int] = None, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+    """
+    Generate random states using the same pattern as initial conditions.
+    This creates random target states without requiring expensive trajectory simulation.
+    
+    Args:
+        num_states: Number of random states to generate
+        spatial_size: Number of spatial points
+        seed: Random seed for reproducibility (optional)
+        device: Device for computation
+        
+    Returns:
+        torch.Tensor: Random states with shape (num_states, spatial_size)
+    """
+    # Set random seed if provided
+    if seed is not None:
+        np.random.seed(seed)
+        
+    # Define spatial domain - same as in make_initial_conditions_and_varying_forcing_terms
+    domain_min = 0.0
+    domain_max = 1.0
+    spatial_step = (domain_max - domain_min) / (spatial_size + 1)
+    x = torch.linspace(domain_min + spatial_step, domain_max - spatial_step, spatial_size)
+
+    # Generate random states with two Gaussian bumps (same pattern as initial conditions)
+    # First Gaussian bump (positive)
+    loc1 = np.random.uniform(0.2, 0.4, (num_states, 1))
+    amp1 = np.random.uniform(0, 2, (num_states, 1))
+    sig1 = np.random.uniform(0.05, 0.15, (num_states, 1))
+    gauss1 = amp1 * np.exp(-0.5 * (np.array(x.view(1, -1).repeat(num_states, 1)) - loc1)**2 / sig1**2)
+
+    # Second Gaussian bump (negative)
+    loc2 = np.random.uniform(0.6, 0.8, (num_states, 1))
+    amp2 = np.random.uniform(-2, 0, (num_states, 1))
+    sig2 = np.random.uniform(0.05, 0.15, (num_states, 1))
+    gauss2 = amp2 * np.exp(-0.5 * (np.array(x.view(1, -1).repeat(num_states, 1)) - loc2)**2 / sig2**2)
+
+    # Combine the two Gaussian bumps
+    random_states = gauss1 + gauss2
+    
+    return torch.tensor(random_states, dtype=torch.float32, device=device)
+
 class BurgersOnTheFlyVecEnv(VectorEnv):
     """
     Vectorized Burgers Equation Environment that generates data on-the-fly.
@@ -29,7 +71,8 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                  time_step: float = 1e-4,
                  forcing_terms_scaling_factor: float = 1.0,
                  reward_type: str = "vanilla",
-                 mse_scaling_factor: float = 1e3
+                 mse_scaling_factor: float = 1e3,
+                 use_random_targets: bool = False
                  ):
         """
         Initialize the vectorized on-the-fly Burgers Equation Environment
@@ -44,11 +87,13 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
             forcing_terms_scaling_factor: Scaling factor for forcing terms
             reward_type: Type of reward function to use (vanilla, inverse_mse, exp_scaled_mse)
             mse_scaling_factor: Scaling factor for MSE reward
+            use_random_targets: If True, use random target generation instead of trajectory simulation
         """
         self.spatial_size = spatial_size
         self.num_time_points = num_time_points
         self.reward_type = reward_type
         self.mse_scaling_factor = mse_scaling_factor
+        self.use_random_targets = use_random_targets
         
         # Define action and observation spaces
         single_action_space = spaces.Box(
@@ -210,25 +255,44 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         num_to_reset = np.sum(mask)
         
         if num_to_reset > 0:
-            # Generate initial conditions and forcing terms for environments to reset
-            initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
-                num_to_reset, num_to_reset, self.spatial_size, self.num_time_points,
-                scaling_factor=self.forcing_terms_scaling_factor, max_time=self.sim_time
-            )
-            
-            # Move to device
-            initial_conditions = initial_conditions.to(self.device)
-            forcing_terms = forcing_terms.to(self.device)
-            
-            # Simulate forward to get target states
-            trajectories = simulate_burgers_equation(
-                initial_conditions, forcing_terms, self.viscosity, self.sim_time,
-                time_step=self.time_step, num_time_points=self.num_time_points,
-                print_progress=False
-            )
-            
-            # Extract target states (final state of simulation)
-            target_states = trajectories[:, -1, :]
+            if self.use_random_targets:
+                # Fast path: Generate random initial conditions and random targets directly
+                # This avoids expensive forcing term generation and trajectory simulation
+                initial_conditions, _ = make_initial_conditions_and_varying_forcing_terms(
+                    num_to_reset, 1, self.spatial_size, 1,  # minimal forcing terms (not used)
+                    scaling_factor=self.forcing_terms_scaling_factor, max_time=self.sim_time
+                )
+                
+                # Generate random target states using the same pattern as initial conditions
+                target_states = generate_random_states(
+                    num_to_reset, self.spatial_size, 
+                    seed=self.rng.randint(0, 2**31 - 1) if hasattr(self.rng, 'randint') else None,
+                    device=self.device
+                )
+                
+                # Move initial conditions to device
+                initial_conditions = initial_conditions.to(self.device)
+                
+            else:
+                # Original path: Generate initial conditions and forcing terms, then simulate
+                initial_conditions, forcing_terms = make_initial_conditions_and_varying_forcing_terms(
+                    num_to_reset, num_to_reset, self.spatial_size, self.num_time_points,
+                    scaling_factor=self.forcing_terms_scaling_factor, max_time=self.sim_time
+                )
+                
+                # Move to device
+                initial_conditions = initial_conditions.to(self.device)
+                forcing_terms = forcing_terms.to(self.device)
+                
+                # Simulate forward to get target states
+                trajectories = simulate_burgers_equation(
+                    initial_conditions, forcing_terms, self.viscosity, self.sim_time,
+                    time_step=self.time_step, num_time_points=self.num_time_points,
+                    print_progress=False
+                )
+                
+                # Extract target states (final state of simulation)
+                target_states = trajectories[:, -1, :]
             
             # Update states for environments being reset
             reset_idx = 0
@@ -453,7 +517,8 @@ def make_burgers_onthefly_vec_env(
     viscosity=0.01,
     sim_time=1.0,
     time_step=1e-4,
-    forcing_terms_scaling_factor=1.0
+    forcing_terms_scaling_factor=1.0,
+    use_random_targets=False
 ):
     """
     Create a vectorized Burgers equation environment with on-the-fly data generation
@@ -466,6 +531,7 @@ def make_burgers_onthefly_vec_env(
         sim_time: Total physical simulation time
         time_step: Physical simulation time step size
         forcing_terms_scaling_factor: Scaling factor for forcing terms
+        use_random_targets: If True, use random target generation instead of trajectory simulation
         
     Returns:
         BurgersOnTheFlyVecEnv: A vectorized Burgers equation environment
@@ -477,9 +543,10 @@ def make_burgers_onthefly_vec_env(
         viscosity=viscosity,
         sim_time=sim_time,
         time_step=time_step,
-        forcing_terms_scaling_factor=forcing_terms_scaling_factor
-    ) 
-    
+        forcing_terms_scaling_factor=forcing_terms_scaling_factor,
+        use_random_targets=use_random_targets
+    )
+
 class BurgersEnv(Env):
     """
     Single environment wrapper around BurgersOnTheFlyVecEnv.
@@ -497,7 +564,8 @@ class BurgersEnv(Env):
                  time_step: float = 1e-4,
                  forcing_terms_scaling_factor: float = 1.0,
                  reward_type: str = "exp_scaled_mse",
-                 mse_scaling_factor: float = 1e3):
+                 mse_scaling_factor: float = 1e3,
+                 use_random_targets: bool = False):
         """
         Initialize the single Burgers environment.
         
@@ -510,6 +578,7 @@ class BurgersEnv(Env):
             forcing_terms_scaling_factor: Scaling factor for forcing terms
             reward_type: Type of reward function to use
             mse_scaling_factor: Scaling factor for MSE reward
+            use_random_targets: If True, use random target generation instead of trajectory simulation
         """
         # Create a VectorEnv with num_envs=1
         self.vec_env = BurgersOnTheFlyVecEnv(
@@ -521,7 +590,8 @@ class BurgersEnv(Env):
             time_step=time_step,
             forcing_terms_scaling_factor=forcing_terms_scaling_factor,
             reward_type=reward_type,
-            mse_scaling_factor=mse_scaling_factor
+            mse_scaling_factor=mse_scaling_factor,
+            use_random_targets=use_random_targets
         )
         
         # Expose the spaces from the vector environment
@@ -537,6 +607,7 @@ class BurgersEnv(Env):
         self.forcing_terms_scaling_factor = forcing_terms_scaling_factor
         self.reward_type = reward_type
         self.mse_scaling_factor = mse_scaling_factor
+        self.use_random_targets = use_random_targets
     
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Reset the environment and return initial observation."""
@@ -610,7 +681,7 @@ def make_burgers_vec_env(num_envs: int = 1, **kwargs):
     
     Args:
         num_envs: Number of parallel environments
-        **kwargs: Environment parameters
+        **kwargs: Environment parameters (including use_random_targets)
         
     Returns:
         BurgersOnTheFlyVecEnv: A vectorized Burgers environment
