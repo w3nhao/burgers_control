@@ -61,7 +61,7 @@ def register_burgers_environments():
     4. All kwargs will be passed to make_burgers_env()
     """
     
-    # Register BurgersVec-v0 (original configuration)
+    # Register BurgersVec-v0 
     register(
         id="BurgersVec-v0",
         entry_point=make_burgers_env,
@@ -74,19 +74,38 @@ def register_burgers_environments():
             "forcing_terms_scaling_factor": 1.0,
             "reward_type": "exp_scaled_mse",
             "mse_scaling_factor": 1e3,
+            "use_random_targets": False,
         },
         max_episode_steps=10,  # num_time_points
     )
     
-    # Register BurgersVec-v1 (faster simulation - 10x speedup)
+    # Register BurgersVec-Tune (Converge Faseter)
     register(
-        id="BurgersVec-v1",
+        id="BurgersVec-V1",
         entry_point=make_burgers_env,
         kwargs={
             "spatial_size": 128,
             "num_time_points": 10,
             "viscosity": 0.01,
-            "sim_time": 0.1,  # Changed from 1.0 to 0.1 for faster training
+            "sim_time": 1.0,
+            "time_step": 1e-4,
+            "forcing_terms_scaling_factor": 1.0,
+            "reward_type": "exp_scaled_mse",
+            "mse_scaling_factor": 5e2,
+            "use_random_targets": False,
+        },
+        max_episode_steps=10,  # num_time_points
+    )
+    
+    # Register BurgersVec-v1 (faster simulation)
+    register(
+        id="BurgersVec-v2",
+        entry_point=make_burgers_env,
+        kwargs={
+            "spatial_size": 128,
+            "num_time_points": 10,
+            "viscosity": 0.01,
+            "sim_time": 0.1,  
             "time_step": 1e-4,
             "forcing_terms_scaling_factor": 1.0,
             "reward_type": "exp_scaled_mse",
@@ -113,43 +132,6 @@ def register_burgers_environments():
         },
         max_episode_steps=5,  # num_time_points
     )
-    
-    # Register BurgersVec-v3 (random targets with sim_time=1.0 for fast training)
-    register(
-        id="BurgersVec-v3",
-        entry_point=make_burgers_env,
-        kwargs={
-            "spatial_size": 128,
-            "num_time_points": 10,
-            "viscosity": 0.01,
-            "sim_time": 1.0,
-            "time_step": 1e-4,
-            "forcing_terms_scaling_factor": 1.0,
-            "reward_type": "exp_scaled_mse",
-            "mse_scaling_factor": 1e3,
-            "use_random_targets": True,  # Key difference: use random targets
-        },
-        max_episode_steps=10,  # num_time_points
-    )
-    
-    # Register BurgersVec-v4 (random targets with sim_time=0.1 for very fast training)
-    register(
-        id="BurgersVec-v4",
-        entry_point=make_burgers_env,
-        kwargs={
-            "spatial_size": 128,
-            "num_time_points": 10,
-            "viscosity": 0.01,
-            "sim_time": 0.1,
-            "time_step": 1e-4,
-            "forcing_terms_scaling_factor": 1.0,
-            "reward_type": "exp_scaled_mse",
-            "mse_scaling_factor": 1e3,
-            "use_random_targets": True,  # Key difference: use random targets
-        },
-        max_episode_steps=10,  # num_time_points
-    )
-
 
 def list_registered_environments():
     """

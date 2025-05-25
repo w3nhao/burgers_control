@@ -22,7 +22,6 @@ __author__ = "Wenhao Deng"
 # Import main modules for easy access
 from .burgers import *
 from .burgers_onthefly_env import *
-from .ppo import *
 from .layers import *
 
 # Import Gymnasium registration (this triggers environment registration)
@@ -48,8 +47,7 @@ __all__ = [
     "get_environment_kwargs",
     "add_environment_spec",
     
-    # Other components
-    "PPOAgent",
+    # Other evaluation functions
     "evaluate_on_testset", 
     "evaluate_on_env",
     "pretrain_policy",

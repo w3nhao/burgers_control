@@ -341,10 +341,6 @@ def load_saved_agent(checkpoint_path: str, device: Optional[torch.device] = None
     return agent, metadata
 
 if __name__ == "__main__":
-    # Load environment variables from .env file
-    from .utils.utils import load_environment_variables
-    load_environment_variables()
-    
     args = tyro.cli(Args)
 
     batch_size = int(args.num_envs * args.num_steps)
@@ -399,6 +395,14 @@ if __name__ == "__main__":
         print(f"Created environment {args.env_id} with configuration:")
         for key, value in env_kwargs.items():
             print(f"  - {key}: {value}")
+            
+        # wandb save env config
+        wandb.config.update({
+            "env_config": env_kwargs,
+            "env_id": args.env_id,
+            "num_envs": args.num_envs,
+            "device": str(device),
+        })
             
     except (ImportError, ValueError) as e:
         print(f"Error creating environment {args.env_id}: {e}")

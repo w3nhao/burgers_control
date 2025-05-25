@@ -70,8 +70,8 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                  sim_time: float = 1.0,
                  time_step: float = 1e-4,
                  forcing_terms_scaling_factor: float = 1.0,
-                 reward_type: str = "vanilla",
-                 mse_scaling_factor: float = 1e3,
+                 reward_type: str = "exp_scaled_mse",
+                 mse_scaling_factor: float = 10.0,
                  use_random_targets: bool = False
                  ):
         """
@@ -256,11 +256,15 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
         
         if num_to_reset > 0:
             if self.use_random_targets:
-                # Fast path: Generate random initial conditions and random targets directly
+                # Fast path: Generate both random initial conditions and random targets directly
                 # This avoids expensive forcing term generation and trajectory simulation
-                initial_conditions, _ = make_initial_conditions_and_varying_forcing_terms(
-                    num_to_reset, 1, self.spatial_size, 1,  # minimal forcing terms (not used)
-                    scaling_factor=self.forcing_terms_scaling_factor, max_time=self.sim_time
+                # and ensures consistency between initial and target state generation
+                
+                # Generate random initial conditions using the same pattern as targets
+                initial_conditions = generate_random_states(
+                    num_to_reset, self.spatial_size, 
+                    seed=self.rng.randint(0, 2**31 - 1) if hasattr(self.rng, 'randint') else None,
+                    device=self.device
                 )
                 
                 # Generate random target states using the same pattern as initial conditions
@@ -269,9 +273,6 @@ class BurgersOnTheFlyVecEnv(VectorEnv):
                     seed=self.rng.randint(0, 2**31 - 1) if hasattr(self.rng, 'randint') else None,
                     device=self.device
                 )
-                
-                # Move initial conditions to device
-                initial_conditions = initial_conditions.to(self.device)
                 
             else:
                 # Original path: Generate initial conditions and forcing terms, then simulate
@@ -564,7 +565,7 @@ class BurgersEnv(Env):
                  time_step: float = 1e-4,
                  forcing_terms_scaling_factor: float = 1.0,
                  reward_type: str = "exp_scaled_mse",
-                 mse_scaling_factor: float = 1e3,
+                 mse_scaling_factor: float = 10.0,
                  use_random_targets: bool = False):
         """
         Initialize the single Burgers environment.
